@@ -1,0 +1,42 @@
+name: Pankou Data Sync
+
+on:
+  schedule:
+    - cron: '20 1 * * 1-5' # 北京时间 09:20
+    - cron: '50 4 * * 1-5'  # 北京时间 12:50
+  workflow_dispatch:
+
+jobs:
+  run-private-script:
+    runs-on: ubuntu-latest
+    steps:
+      # 第一步：检出仓库的代码
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+        with:
+          repository: hicccx999/stock-pankou
+          token: ${{ secrets.MY_PAT }}
+          path: core
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+
+      - name: Install Dependencies
+        run: pip install requests
+
+      # 第二步：执行仓库里的脚本
+      - name: Run scripts
+        run: |
+          cd core
+          python scripts/pankou.py
+
+      # 第三步：将生成的数据推回仓库
+      - name: Push Data to Repo
+        run: |
+          cd core
+          git config --global user.name "StockBot-Trigger"
+          git config --global user.email "bot@github.com"
+          git add data/*.txt
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-sync: $(date +'%Y-%m-%d %H:%M:%S')" && git push)
