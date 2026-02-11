@@ -24,7 +24,9 @@ jobs:
           python-version: '3.13'
 
       - name: Install Dependencies
-        run: pip install requests
+        run: |
+          pip install requests
+          pip install zstandard
 
       # 第二步：执行仓库里的脚本
       - name: Run scripts
