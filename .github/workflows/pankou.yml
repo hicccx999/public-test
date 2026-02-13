@@ -39,8 +39,8 @@ jobs:
       - name: Push Data to Repo
         run: |
           cd core
-          git config --global user.name "StockBot-Trigger"
-          git config --global user.email "bot@github.com"
+          git config --global user.name "hicccx999"
+          git config --global user.email "hicccx999@163.com"
           git add data/*.bin
           git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-sync: $(date +'%Y-%m-%d %H:%M:%S')" && git push)
           TAG_NAME=$(date +'%Y%m%d')
