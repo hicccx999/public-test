@@ -41,7 +41,7 @@ jobs:
           cd core
           git config --global user.name "StockBot-Trigger"
           git config --global user.email "bot@github.com"
-          git add data/*.txt
+          git add data/*.bin
           git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-sync: $(date +'%Y-%m-%d %H:%M:%S')" && git push)
           TAG_NAME=$(date +'%Y%m%d')
           git tag -f "$TAG_NAME"
