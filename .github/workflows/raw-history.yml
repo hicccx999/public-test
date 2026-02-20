@@ -3,9 +3,9 @@ permissions:
   contents: write
 
 on:
-  schedule:
-    # 每天 UTC 14:00（北京时间 22:00）执行
-    - cron: '0 14 * * *'
+  # schedule:
+  #   # 每天 UTC 14:00（北京时间 22:00）执行
+  #   - cron: '0 14 * * *'
   workflow_dispatch:
     inputs:
       day_number:
