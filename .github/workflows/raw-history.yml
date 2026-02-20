@@ -1,0 +1,113 @@
+name: 历史盘口数据批量下载
+permissions:
+  contents: write
+
+on:
+  schedule:
+    # 每天 UTC 14:00（北京时间 22:00）执行
+    - cron: '0 14 * * *'
+  workflow_dispatch:
+    inputs:
+      day_number:
+        description: '第几天（留空则自动计算，1 = 2026-02-21）'
+        required: false
+        type: string
+      batch_size:
+        description: '每个 job 处理的股票数量（默认 30）'
+        required: false
+        type: string
+        default: '30'
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      from_date: ${{ steps.gen.outputs.from_date }}
+      to_date: ${{ steps.gen.outputs.to_date }}
+      should_run: ${{ steps.gen.outputs.should_run }}
+    steps:
+      - name: 检出 stock-grabber 代码
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.MY_PAT }}
+
+      - name: 生成分片矩阵
+        id: gen
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.day_number }}" ]; then
+            ARGS="$ARGS day_number=${{ github.event.inputs.day_number }}"
+          fi
+          if [ -n "${{ github.event.inputs.batch_size }}" ]; then
+            ARGS="$ARGS batch_size=${{ github.event.inputs.batch_size }}"
+          fi
+          python3 scripts2/prepare-matrix-all.py $ARGS
+
+  download:
+    needs: prepare
+    if: needs.prepare.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: 打印任务信息
+        run: |
+          echo "UTC: $(date -u)"
+          echo "Beijing: $(TZ='Asia/Shanghai' date)"
+          echo "📦 Batch ID: ${{ matrix.batch_id }}"
+          echo "📅 日期范围: ${{ needs.prepare.outputs.from_date }} ~ ${{ needs.prepare.outputs.to_date }}"
+
+      - name: 检出 stock-grabber 代码
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.MY_PAT }}
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 下载盘口数据并提交到目标仓库
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          FROM_DATE: ${{ needs.prepare.outputs.from_date }}
+          TO_DATE: ${{ needs.prepare.outputs.to_date }}
+          SECIDS: ${{ matrix.secids }}
+        run: |
+          chmod +x scripts2/workflow-raw.sh
+          
+          IFS=',' read -ra STOCK_LIST <<< "$SECIDS"
+          TOTAL=${#STOCK_LIST[@]}
+          echo "📈 本批次共 $TOTAL 只股票"
+          
+          SUCCESS=0
+          FAIL=0
+          
+          for i in "${!STOCK_LIST[@]}"; do
+            SECID="${STOCK_LIST[$i]}"
+            NUM=$((i + 1))
+            echo ""
+            echo "============================================"
+            echo "[$NUM/$TOTAL] 处理股票: $SECID"
+            echo "============================================"
+            
+            if scripts2/workflow-raw.sh "$SECID" "$FROM_DATE" "$TO_DATE"; then
+              SUCCESS=$((SUCCESS + 1))
+            else
+              FAIL=$((FAIL + 1))
+              echo "⚠️ $SECID 处理失败，继续下一只..."
+            fi
+          done
+          
+          echo ""
+          echo "📊 批次完成: 成功 $SUCCESS, 失败 $FAIL, 总计 $TOTAL"
