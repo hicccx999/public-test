@@ -1,4 +1,4 @@
-name: 历史盘口数据批量下载
+name: 历史数据批量下载
 permissions:
   contents: write
 
@@ -76,7 +76,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 下载盘口数据并提交到目标仓库
+      - name: 下载数据并提交到目标仓库
         env:
           REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}

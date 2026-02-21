@@ -1,4 +1,4 @@
-name: 盘口数据48批次下载
+name: 数据48批次下载
 permissions:
   contents: write
 
@@ -98,7 +98,7 @@ jobs:
           ")
           echo "📊 每批约: $BATCH_SIZE 只"
 
-      - name: 下载盘口数据
+      - name: 下载数据
         if: steps.calc.outputs.should_run == 'true'
         env:
           REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
