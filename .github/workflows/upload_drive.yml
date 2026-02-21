@@ -1,3 +1,13 @@
+name: Upload to Google Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: '备注信息'
+        required: false
+        default: 'test upload'
+
 jobs:
   drive_upload:
     runs-on: ubuntu-latest
@@ -8,28 +18,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate Files
+      - name: Generate Test Files
         run: |
-          mkdir output
-          echo "Data 1" > output/data1.txt
-          echo "Data 2" > output/data2.txt
+          mkdir -p output
+          echo "Test file 1 - $(date)" > output/data1.txt
+          echo "Test file 2 - $(date)" > output/data2.txt
+          echo "Message: ${{ github.event.inputs.message }}" > output/info.txt
+          echo "Generated files:"
+          ls -la output/
 
       - id: 'auth'
         name: 'Authenticate to Google Cloud'
         uses: 'google-github-actions/auth@v2'
         with:
-          workload_identity_provider: 'projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-          service_account: 'drive-uploader@PROJECT_ID.iam.gserviceaccount.com'
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: 'Set up Python'
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.12'
 
       - name: 'Install Dependencies'
         run: pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
       - name: 'Upload to Drive'
         env:
-          GDRIVE_FOLDER_ID: '1iYumzcyKNbMcxFqkuLkZCwT9yn11YC7O'
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: python scripts/upload_drive.py
