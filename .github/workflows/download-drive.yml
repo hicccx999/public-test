@@ -1,0 +1,164 @@
+name: 下载历史数据并上传 Google Drive
+
+on:
+  workflow_dispatch:
+    inputs:
+      stocks:
+        description: '股票列表（逗号分隔，如: sz300682,sh600267）'
+        required: true
+        type: string
+      year:
+        description: '年份（如: 2025）'
+        required: true
+        type: string
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  # ============================================================
+  # 第一步：生成分片矩阵 (secid × month)
+  # ============================================================
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      year: ${{ steps.gen.outputs.year }}
+      should_run: ${{ steps.gen.outputs.should_run }}
+    steps:
+      - name: 检出 stock-grabber 代码
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 生成分片矩阵
+        id: gen
+        run: |
+          python3 scripts2/prepare-matrix-manual.py \
+            stocks="${{ github.event.inputs.stocks }}" \
+            year="${{ github.event.inputs.year }}"
+
+  # ============================================================
+  # 第二步：并行下载（每个 job = 一只股票的一个月数据）
+  # ============================================================
+  download:
+    needs: prepare
+    if: needs.prepare.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: 打印任务信息
+        run: |
+          echo "📈 股票: ${{ matrix.secid }}"
+          echo "📅 月份: ${{ needs.prepare.outputs.year }}-${{ matrix.month }}"
+          echo "📅 范围: ${{ matrix.from_date }} ~ ${{ matrix.to_date }}"
+
+      - name: 检出 stock-grabber 代码
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 下载数据
+        run: |
+          python3 scripts2/fetch-upload-drive.py \
+            secid=${{ matrix.secid }} \
+            from=${{ matrix.from_date }} \
+            to=${{ matrix.to_date }} \
+            output_dir=./output
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-${{ matrix.secid }}-${{ matrix.month }}
+          path: output/${{ matrix.secid }}/
+          retention-days: 1
+
+  # ============================================================
+  # 第三步：汇总打包并上传 Google Drive
+  # ============================================================
+  upload:
+    needs: [prepare, download]
+    if: needs.prepare.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出 stock-grabber 代码
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装依赖
+        run: pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+
+      - name: 下载所有 artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          pattern: data-*
+
+      - name: 整理目录结构并打包上传
+        env:
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          UPLOAD_DRIVE: 'true'
+        run: |
+          YEAR="${{ needs.prepare.outputs.year }}"
+          STOCKS="${{ github.event.inputs.stocks }}"
+
+          echo "📁 整理 artifact 目录..."
+          ls -la ./artifacts/
+
+          # 将 artifacts/data-{secid}-{month}/{year}/{month}/ 合并到 output/{secid}/{year}/{month}/
+          mkdir -p ./output
+          for dir in ./artifacts/data-*/; do
+            # 从目录名提取 secid: data-sz300682-01 → sz300682
+            dirname=$(basename "$dir")
+            secid=$(echo "$dirname" | sed 's/^data-//' | sed 's/-[0-9]*$//')
+            
+            echo "  📂 合并: $dirname → output/$secid/"
+            mkdir -p "./output/$secid"
+            cp -r "$dir"* "./output/$secid/" 2>/dev/null || true
+          done
+
+          echo ""
+          echo "📁 合并后目录结构:"
+          find ./output -type f | head -20
+          echo "..."
+
+          # 按股票逐个打包并上传
+          IFS=',' read -ra STOCK_LIST <<< "$STOCKS"
+          for SECID in "${STOCK_LIST[@]}"; do
+            SECID=$(echo "$SECID" | xargs)
+            echo ""
+            echo "============================================"
+            echo "📦 打包并上传: $SECID ($YEAR)"
+            echo "============================================"
+            
+            python3 scripts2/fetch-upload-drive.py \
+              secid="$SECID" \
+              from="${YEAR}0101" \
+              to="${YEAR}1231" \
+              output_dir=./output
+          done
+
+          echo ""
+          echo "🎉 全部完成！"
