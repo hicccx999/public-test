@@ -1,0 +1,111 @@
+name: 盘口数据48批次下载
+permissions:
+  contents: write
+
+on:
+  schedule:
+    # 每小时整点执行（UTC），对应北京时间每小时
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      batch_index:
+        description: '手动指定批次号 (0-47)，留空则自动计算'
+        required: false
+        type: string
+      from_date:
+        description: '起始日期 (YYYYMMDD)，默认 20260101'
+        required: false
+        type: string
+        default: '20260101'
+
+env:
+  TZ: Asia/Shanghai
+  # 起始时间：第 0 批从此时刻开始，每小时推进一批
+  START_TIME: '2026-02-21 15:00:00'
+  TOTAL_BATCHES: '48'
+
+jobs:
+  batch-download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 80
+
+    steps:
+      - name: 计算批次号并判断是否执行
+        id: calc
+        run: |
+          export TZ='Asia/Shanghai'
+          NOW=$(date '+%Y-%m-%d %H:%M:%S')
+          echo "⏰ 当前北京时间: $NOW"
+
+          START="${START_TIME}"
+          echo "🕐 起始时间: $START"
+
+          # 计算小时差
+          NOW_EPOCH=$(date -d "$NOW" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S" "$NOW" +%s)
+          START_EPOCH=$(date -d "$START" +%s 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S" "$START" +%s)
+          DIFF_HOURS=$(( (NOW_EPOCH - START_EPOCH) / 3600 ))
+          echo "📊 小时差: $DIFF_HOURS"
+
+          # 手动指定或自动计算
+          if [ -n "${{ github.event.inputs.batch_index }}" ]; then
+            BATCH_INDEX="${{ github.event.inputs.batch_index }}"
+            echo "🔧 手动指定批次: $BATCH_INDEX"
+          else
+            BATCH_INDEX=$DIFF_HOURS
+          fi
+
+          echo "batch_index=$BATCH_INDEX" >> "$GITHUB_OUTPUT"
+
+          if [ "$BATCH_INDEX" -lt 0 ] || [ "$BATCH_INDEX" -ge "$TOTAL_BATCHES" ]; then
+            echo "⏭️  批次号 $BATCH_INDEX 不在 0~$((TOTAL_BATCHES - 1)) 范围内，跳过"
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ 将执行批次: $BATCH_INDEX"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 检出 stock-grabber 代码
+        if: steps.calc.outputs.should_run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 设置 Python 环境
+        if: steps.calc.outputs.should_run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 打印任务信息
+        if: steps.calc.outputs.should_run == 'true'
+        run: |
+          echo "UTC: $(date -u)"
+          echo "Beijing: $(TZ='Asia/Shanghai' date)"
+          echo "📦 批次号: ${{ steps.calc.outputs.batch_index }} / $((TOTAL_BATCHES - 1))"
+          echo "📅 起始时间: $START_TIME"
+
+          TOTAL=$(python3 -c "
+          import json; d=json.load(open('data/all_stocks.json'))
+          print(d['count']['total'])
+          ")
+          echo "📈 总股票数: $TOTAL"
+
+          BATCH_SIZE=$(python3 -c "
+          import json, math
+          d=json.load(open('data/all_stocks.json'))
+          print(math.ceil(d['count']['total'] / $TOTAL_BATCHES))
+          ")
+          echo "📊 每批约: $BATCH_SIZE 只"
+
+      - name: 下载盘口数据
+        if: steps.calc.outputs.should_run == 'true'
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          FROM_DATE: ${{ github.event.inputs.from_date || '20260101' }}
+        run: |
+          python3 scripts3/batch-pankou-download.py \
+            batch_index=${{ steps.calc.outputs.batch_index }} \
+            from_date=$FROM_DATE \
+            total_batches=$TOTAL_BATCHES
