@@ -11,9 +11,6 @@ on:
 jobs:
   drive_upload:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -27,15 +24,6 @@ jobs:
           echo "Generated files:"
           ls -la output/
 
-      - id: 'auth'
-        name: 'Authenticate to Google Cloud'
-        uses: 'google-github-actions/auth@v2'
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-          token_format: 'access_token'
-          access_token_scopes: 'https://www.googleapis.com/auth/drive'
-
       - name: 'Install Rclone'
         run: |
           curl -sSL https://rclone.org/install.sh | sudo bash
@@ -44,17 +32,20 @@ jobs:
       - name: 'Configure Rclone'
         run: |
           mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf << EOF
+          cat > ~/.config/rclone/rclone.conf << 'RCLONE_EOF'
           [gdrive]
           type = drive
           scope = drive
-          token = {"access_token":"${{ steps.auth.outputs.access_token }}","token_type":"Bearer","expiry":"2099-01-01T00:00:00Z"}
-          root_folder_id = ${{ secrets.GDRIVE_FOLDER_ID }}
-          EOF
+          RCLONE_EOF
+          # Append secrets separately to avoid heredoc expansion issues
+          echo "  client_id = ${{ secrets.GDRIVE_CLIENT_ID }}" >> ~/.config/rclone/rclone.conf
+          echo "  client_secret = ${{ secrets.GDRIVE_CLIENT_SECRET }}" >> ~/.config/rclone/rclone.conf
+          echo '  token = {"access_token":"","refresh_token":"${{ secrets.GDRIVE_REFRESH_TOKEN }}","token_type":"Bearer","expiry":"2000-01-01T00:00:00Z"}' >> ~/.config/rclone/rclone.conf
+          echo "  root_folder_id = ${{ secrets.GDRIVE_FOLDER_ID }}" >> ~/.config/rclone/rclone.conf
 
       - name: 'Upload to Drive via Rclone'
         run: |
           echo "Uploading files to Google Drive..."
-          rclone copy ./output gdrive: -v --drive-acknowledge-abuse
+          rclone copy ./output gdrive: -v
           echo "Upload complete!"
           rclone ls gdrive: || true
