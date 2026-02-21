@@ -29,21 +29,14 @@ jobs:
           curl -sSL https://rclone.org/install.sh | sudo bash
           rclone version
 
-      - name: 'Configure Rclone'
-        run: |
-          mkdir -p ~/.config/rclone
-          cat > ~/.config/rclone/rclone.conf << 'RCLONE_EOF'
-          [gdrive]
-          type = drive
-          scope = drive
-          RCLONE_EOF
-          # Append secrets separately to avoid heredoc expansion issues
-          echo "  client_id = ${{ secrets.GDRIVE_CLIENT_ID }}" >> ~/.config/rclone/rclone.conf
-          echo "  client_secret = ${{ secrets.GDRIVE_CLIENT_SECRET }}" >> ~/.config/rclone/rclone.conf
-          echo '  token = {"access_token":"","refresh_token":"${{ secrets.GDRIVE_REFRESH_TOKEN }}","token_type":"Bearer","expiry":"2000-01-01T00:00:00Z"}' >> ~/.config/rclone/rclone.conf
-          echo "  root_folder_id = ${{ secrets.GDRIVE_FOLDER_ID }}" >> ~/.config/rclone/rclone.conf
-
       - name: 'Upload to Drive via Rclone'
+        env:
+          RCLONE_CONFIG_GDRIVE_TYPE: drive
+          RCLONE_CONFIG_GDRIVE_SCOPE: drive
+          RCLONE_CONFIG_GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          RCLONE_CONFIG_GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          RCLONE_CONFIG_GDRIVE_TOKEN: '{"access_token":"","refresh_token":"${{ secrets.GDRIVE_REFRESH_TOKEN }}","token_type":"Bearer","expiry":"2000-01-01T00:00:00Z"}'
+          RCLONE_CONFIG_GDRIVE_ROOT_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: |
           echo "Uploading files to Google Drive..."
           rclone copy ./output gdrive: -v
