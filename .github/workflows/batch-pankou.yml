@@ -89,7 +89,7 @@ jobs:
           import json; d=json.load(open('data/all_stocks.json'))
           print(d['count']['total'])
           ")
-          echo "📈 总股票数: $TOTAL"
+          echo "📈 总数: $TOTAL"
 
           BATCH_SIZE=$(python3 -c "
           import json, math

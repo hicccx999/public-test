@@ -1,0 +1,35 @@
+jobs:
+  drive_upload:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate Files
+        run: |
+          mkdir output
+          echo "Data 1" > output/data1.txt
+          echo "Data 2" > output/data2.txt
+
+      - id: 'auth'
+        name: 'Authenticate to Google Cloud'
+        uses: 'google-github-actions/auth@v2'
+        with:
+          workload_identity_provider: 'projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'drive-uploader@PROJECT_ID.iam.gserviceaccount.com'
+
+      - name: 'Set up Python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: 'Install Dependencies'
+        run: pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+
+      - name: 'Upload to Drive'
+        env:
+          GDRIVE_FOLDER_ID: '1iYumzcyKNbMcxFqkuLkZCwT9yn11YC7O'
+        run: python scripts/upload_drive.py
