@@ -39,7 +39,8 @@ def upload_files(folder_id, local_path):
             result = service.files().create(
                 body=file_metadata,
                 media_body=media,
-                fields='id, name, webViewLink'
+                fields='id, name, webViewLink',
+                supportsAllDrives=True,
             ).execute()
             print(f"  ✓ Uploaded: {filename} (id: {result.get('id')})")
             if result.get('webViewLink'):
