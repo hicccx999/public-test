@@ -34,15 +34,32 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
-      - name: 'Set up Python'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      - name: 'Get Access Token'
+        id: token
+        run: |
+          ACCESS_TOKEN=$(gcloud auth print-access-token)
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "access_token=$ACCESS_TOKEN" >> "$GITHUB_OUTPUT"
 
-      - name: 'Install Dependencies'
-        run: pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+      - name: 'Install Rclone'
+        run: |
+          curl -sSL https://rclone.org/install.sh | sudo bash
+          rclone version
 
-      - name: 'Upload to Drive'
-        env:
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-        run: python scripts/upload_drive.py
+      - name: 'Configure Rclone'
+        run: |
+          mkdir -p ~/.config/rclone
+          cat > ~/.config/rclone/rclone.conf << EOF
+          [gdrive]
+          type = drive
+          scope = drive
+          token = {"access_token":"${{ steps.token.outputs.access_token }}","token_type":"Bearer","expiry":"2099-01-01T00:00:00Z"}
+          root_folder_id = ${{ secrets.GDRIVE_FOLDER_ID }}
+          EOF
+
+      - name: 'Upload to Drive via Rclone'
+        run: |
+          echo "Uploading files to Google Drive..."
+          rclone copy ./output gdrive: -v --drive-acknowledge-abuse
+          echo "Upload complete!"
+          rclone ls gdrive: || true
