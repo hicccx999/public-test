@@ -120,7 +120,10 @@ jobs:
           "
 
       - name: 提交更新
+        env:
+          GRABBER_PAT: ${{ secrets.GRABBER_PAT }}
         run: |
+          git remote set-url origin "https://x-access-token:${GRABBER_PAT}@github.com/hiyishui/stock-grabber.git"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/temp2_stocks.json
