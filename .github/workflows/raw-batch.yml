@@ -18,7 +18,6 @@ jobs:
       matrix: ${{ steps.gen.outputs.matrix }}
       should_run: ${{ steps.gen.outputs.should_run }}
       to_date: ${{ steps.gen.outputs.to_date }}
-      batch_secids: ${{ steps.gen.outputs.batch_secids }}
     steps:
       - name: 检出 stock-grabber
         uses: actions/checkout@v4
