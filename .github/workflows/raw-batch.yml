@@ -1,0 +1,127 @@
+name: 批量下载到github
+permissions:
+  contents: write
+
+on:
+  # schedule:
+  #   - cron: '0 14 * * *'
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  # ── 1. 生成矩阵 ──
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+      should_run: ${{ steps.gen.outputs.should_run }}
+      from_date: ${{ steps.gen.outputs.from_date }}
+      to_date: ${{ steps.gen.outputs.to_date }}
+      batch_secids: ${{ steps.gen.outputs.batch_secids }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 生成分片矩阵
+        id: gen
+        run: python3 scripts2/prepare-raw-batch.py
+
+  # ── 2. 每只股票 1 个 job，并行下载全年数据并推送 ──
+  download:
+    needs: prepare
+    if: needs.prepare.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 50
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 下载 ${{ matrix.secid }} 全年数据并推送
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+        run: |
+          chmod +x scripts2/workflow-raw.sh
+          scripts2/workflow-raw.sh "${{ matrix.secid }}" "${{ needs.prepare.outputs.from_date }}" "${{ needs.prepare.outputs.to_date }}"
+
+      - name: 记录成功
+        if: success()
+        run: echo "${{ matrix.secid }}" > success.txt
+
+      - name: 上传成功标记
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: success-${{ matrix.secid }}
+          path: success.txt
+
+  # ── 3. 汇总成功的股票，更新 temp2_stocks.json ──
+  update:
+    needs: [prepare, download]
+    if: needs.prepare.outputs.should_run == 'true' && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 下载所有成功标记
+        uses: actions/download-artifact@v4
+        with:
+          pattern: success-*
+          path: results/
+
+      - name: 更新 temp2_stocks.json
+        run: |
+          python3 -c "
+          import json, glob, os
+
+          # 收集本次成功的股票
+          succeeded = set()
+          for f in glob.glob('results/success-*/success.txt'):
+              with open(f) as fh:
+                  secid = fh.read().strip()
+                  if secid:
+                      succeeded.add(secid)
+          print(f'✅ 本次成功: {len(succeeded)} 只')
+
+          # 读取现有 temp2
+          temp2_path = 'data/temp2_stocks.json'
+          with open(temp2_path) as f:
+              temp2 = json.load(f)
+
+          completed = set(temp2.get('completed', []))
+          completed.update(succeeded)
+          temp2['completed'] = sorted(completed)
+
+          with open(temp2_path, 'w') as f:
+              json.dump(temp2, f, ensure_ascii=False, indent=2)
+
+          print(f'📊 累计完成: {len(completed)} 只')
+          remaining = 5484 - len(completed)
+          if remaining > 0:
+              runs_needed = (remaining + 49) // 50
+              print(f'📝 剩余: {remaining} 只，预计还需 {runs_needed} 次运行')
+          else:
+              print('🎉 所有股票已处理完成！')
+          "
+
+      - name: 提交更新
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/temp2_stocks.json
+          git diff --cached --quiet && echo "无变更" || (git commit -m "chore: update temp2_stocks.json" && git push)
