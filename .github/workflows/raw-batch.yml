@@ -17,7 +17,6 @@ jobs:
     outputs:
       matrix: ${{ steps.gen.outputs.matrix }}
       should_run: ${{ steps.gen.outputs.should_run }}
-      from_date: ${{ steps.gen.outputs.from_date }}
       to_date: ${{ steps.gen.outputs.to_date }}
       batch_secids: ${{ steps.gen.outputs.batch_secids }}
     steps:
@@ -53,7 +52,7 @@ jobs:
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
         run: |
           chmod +x scripts2/workflow-raw.sh
-          scripts2/workflow-raw.sh "${{ matrix.secid }}" "${{ needs.prepare.outputs.from_date }}" "${{ needs.prepare.outputs.to_date }}"
+          scripts2/workflow-raw.sh "${{ matrix.secid }}" "${{ matrix.from_date }}" "${{ needs.prepare.outputs.to_date }}"
 
       - name: 记录成功
         if: success()
