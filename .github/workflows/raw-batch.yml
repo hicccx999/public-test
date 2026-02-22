@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 50
+      max-parallel: 200
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
       - name: 检出 stock-grabber
@@ -113,7 +113,7 @@ jobs:
           print(f'📊 累计完成: {len(completed)} 只')
           remaining = 5484 - len(completed)
           if remaining > 0:
-              runs_needed = (remaining + 49) // 50
+              runs_needed = (remaining + 199) // 200
               print(f'📝 剩余: {remaining} 只，预计还需 {runs_needed} 次运行')
           else:
               print('🎉 所有股票已处理完成！')
