@@ -1,0 +1,126 @@
+name: 检查缺失交易日
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'errors=仅重试上次失败的, all=全部股票, missing=补下载缺失日期'
+        required: false
+        default: 'errors'
+        type: choice
+        options:
+          - errors
+          - all
+          - missing
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  check:
+    if: inputs.mode != 'missing'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 检查缺失日期
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          CHECK_MODE: ${{ inputs.mode || 'errors' }}
+        run: python3 scripts2/check-missing-dates.py
+
+      - name: 提交结果
+        env:
+          GRABBER_PAT: ${{ secrets.GRABBER_PAT }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GRABBER_PAT}@github.com/hiyishui/stock-grabber.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/missing_dates.json
+          git diff --cached --quiet && echo "无变更" || (git commit -m "chore: update missing_dates.json" && git push)
+
+  fix:
+    if: inputs.mode == 'missing'
+    runs-on: ubuntu-latest
+    outputs:
+      has_missing: ${{ steps.matrix.outputs.has_missing }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 生成分片矩阵
+        id: matrix
+        run: python3 scripts2/prepare-fix-matrix.py
+
+  fix-shard:
+    if: inputs.mode == 'missing' && needs.fix.outputs.has_missing == 'true'
+    needs: fix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJson(needs.fix.outputs.matrix) }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 补下载缺失日期数据 (分片 ${{ matrix.shard }})
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          SECIDS: ${{ matrix.secids }}
+          SHARD_ID: ${{ matrix.shard }}
+        run: python3 scripts2/fix-missing-dates.py
+
+      - name: 上传分片结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fix-result-${{ matrix.shard }}
+          path: data/fix_results/shard_${{ matrix.shard }}.json
+          retention-days: 1
+
+  fix-merge:
+    if: inputs.mode == 'missing' && needs.fix.outputs.has_missing == 'true'
+    needs: [fix, fix-shard]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 下载所有分片结果
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fix-result-*
+          path: data/fix_results
+          merge-multiple: true
+
+      - name: 汇总修复结果
+        run: python3 scripts2/merge-fix-results.py
+
+      - name: 提交结果
+        env:
+          GRABBER_PAT: ${{ secrets.GRABBER_PAT }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GRABBER_PAT}@github.com/hiyishui/stock-grabber.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/missing_dates.json
+          git diff --cached --quiet && echo "无变更" || (git commit -m "chore: fix missing dates" && git push)
