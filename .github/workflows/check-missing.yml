@@ -6,11 +6,12 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'errors=仅重试上次失败的, all=全部股票, missing=补下载缺失日期'
+        description: 'today=下载当天全市场, errors=重试失败, all=全量检查, missing=补缺失'
         required: false
-        default: 'errors'
+        default: 'today'
         type: choice
         options:
+          - today
           - errors
           - all
           - missing
@@ -19,8 +20,53 @@ env:
   TZ: Asia/Shanghai
 
 jobs:
+  # ── today 模式：下载当天全市场数据 ──
+  today-prepare:
+    if: inputs.mode == 'today' || inputs.mode == ''
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.matrix.outputs.should_run }}
+      today: ${{ steps.matrix.outputs.today }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 生成 today 分片矩阵
+        id: matrix
+        run: python3 scripts2/prepare-today-matrix.py
+
+  today-shard:
+    if: (inputs.mode == 'today' || inputs.mode == '') && needs.today-prepare.outputs.should_run == 'true'
+    needs: today-prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJson(needs.today-prepare.outputs.matrix) }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 下载当天数据 (分片 ${{ matrix.shard }})
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          SECIDS: ${{ matrix.secids }}
+          SHARD_ID: ${{ matrix.shard }}
+          FIX_MODE: today
+          TODAY_DATE: ${{ needs.today-prepare.outputs.today }}
+        run: python3 scripts2/fix-missing-dates.py
+
+  # ── check 模式：检查缺失日期 ──
   check:
-    if: inputs.mode != 'missing'
+    if: inputs.mode == 'errors' || inputs.mode == 'all'
     runs-on: ubuntu-latest
     steps:
       - name: 检出 stock-grabber
@@ -33,7 +79,7 @@ jobs:
         env:
           REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
-          CHECK_MODE: ${{ inputs.mode || 'errors' }}
+          CHECK_MODE: ${{ inputs.mode }}
         run: python3 scripts2/check-missing-dates.py
 
       - name: 提交结果
@@ -46,6 +92,7 @@ jobs:
           git add data/missing_dates.json
           git diff --cached --quiet && echo "无变更" || (git commit -m "chore: update missing_dates.json" && git push)
 
+  # ── missing 模式：补下载缺失日期 ──
   fix:
     if: inputs.mode == 'missing'
     runs-on: ubuntu-latest
