@@ -1,0 +1,279 @@
+name: 下载盘口数据
+permissions:
+  contents: write
+
+on:
+#   schedule:
+#     - cron: '0 8 * * 1-5'  # UTC 08:00 = 北京 16:00, 工作日收盘后
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '运行模式'
+        required: false
+        default: 'by-day'
+        type: choice
+        options:
+          - by-day
+          - by-year
+          - fix-miss
+          - check-errors
+          - check-all
+      day:
+        description: 'by-day 模式目标日期 YYYYMMDD (默认当天)'
+        required: false
+        type: string
+      year:
+        description: 'by-year / check 模式目标年份 YYYY (默认当年)'
+        required: false
+        type: string
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  # ── by-day 模式: 下载当天全市场数据 ──────────────────────
+  day-prepare:
+    if: inputs.mode == 'by-day' || inputs.mode == '' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.matrix.outputs.should_run }}
+      day: ${{ steps.matrix.outputs.day }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 生成分片矩阵
+        id: matrix
+        env:
+          MODE: by-day
+          DAY: ${{ inputs.day }}
+        run: python3 scripts/prepare_matrix.py
+
+  day-shard:
+    if: (inputs.mode == 'by-day' || inputs.mode == '' || github.event_name == 'schedule') && needs.day-prepare.outputs.should_run == 'true'
+    needs: day-prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 40
+      matrix: ${{ fromJson(needs.day-prepare.outputs.matrix) }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 下载数据 (分片 ${{ matrix.shard }})
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          MODE: by-day
+          SECIDS: ${{ matrix.secids }}
+          SHARD_ID: ${{ matrix.shard }}
+          DAY: ${{ needs.day-prepare.outputs.day }}
+        run: python3 scripts/download_data.py
+
+  # ── by-year 模式: 下载指定年份全量数据 ──────────────────
+  year-prepare:
+    if: inputs.mode == 'by-year'
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.matrix.outputs.should_run }}
+      year: ${{ steps.matrix.outputs.year }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 生成分片矩阵
+        id: matrix
+        env:
+          MODE: by-year
+          YEAR: ${{ inputs.year }}
+        run: python3 scripts/prepare_matrix.py
+
+  year-download:
+    if: inputs.mode == 'by-year' && needs.year-prepare.outputs.should_run == 'true'
+    needs: year-prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 200
+      matrix: ${{ fromJson(needs.year-prepare.outputs.matrix) }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 下载 ${{ matrix.secid }} 全年数据
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          MODE: by-year
+          SECIDS: '["${{ matrix.secid }}"]'
+          YEAR: ${{ needs.year-prepare.outputs.year }}
+        run: python3 scripts/download_data.py
+
+      - name: 上传成功标记
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: year-ok-${{ matrix.secid }}
+          path: data/year_results/${{ matrix.secid }}.txt
+          retention-days: 1
+
+  year-merge:
+    if: inputs.mode == 'by-year' && needs.year-prepare.outputs.should_run == 'true' && !cancelled()
+    needs: [year-prepare, year-download]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 下载所有成功标记
+        uses: actions/download-artifact@v4
+        with:
+          pattern: year-ok-*
+          path: data/year_results
+          merge-multiple: true
+
+      - name: 汇总完成进度
+        env:
+          MODE: by-year
+          YEAR: ${{ needs.year-prepare.outputs.year }}
+        run: python3 scripts/merge_results.py
+
+      - name: 提交结果
+        env:
+          GRABBER_PAT: ${{ secrets.GRABBER_PAT }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GRABBER_PAT}@github.com/hiyishui/stock-grabber.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/year_done/
+          git diff --cached --quiet && echo "无变更" || (git commit -m "chore: update year progress (${{ needs.year-prepare.outputs.year }})" && git push)
+
+  # ── fix-miss 模式: 补下载缺失日期 ──────────────────────
+  fix-prepare:
+    if: inputs.mode == 'fix-miss'
+    runs-on: ubuntu-latest
+    outputs:
+      has_missing: ${{ steps.matrix.outputs.has_missing }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 生成分片矩阵
+        id: matrix
+        env:
+          MODE: fix-miss
+        run: python3 scripts/prepare_matrix.py
+
+  fix-shard:
+    if: inputs.mode == 'fix-miss' && needs.fix-prepare.outputs.has_missing == 'true'
+    needs: fix-prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix: ${{ fromJson(needs.fix-prepare.outputs.matrix) }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 补下载缺失数据 (分片 ${{ matrix.shard }})
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          MODE: fix-miss
+          SECIDS: ${{ matrix.secids }}
+          SHARD_ID: ${{ matrix.shard }}
+        run: python3 scripts/download_data.py
+
+      - name: 上传分片结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fix-result-${{ matrix.shard }}
+          path: data/fix_results/shard_${{ matrix.shard }}.json
+          retention-days: 1
+
+  fix-merge:
+    if: inputs.mode == 'fix-miss' && needs.fix-prepare.outputs.has_missing == 'true'
+    needs: [fix-prepare, fix-shard]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 下载所有分片结果
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fix-result-*
+          path: data/fix_results
+          merge-multiple: true
+
+      - name: 汇总修复结果
+        run: python3 scripts/merge_results.py
+
+      - name: 提交结果
+        env:
+          GRABBER_PAT: ${{ secrets.GRABBER_PAT }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GRABBER_PAT}@github.com/hiyishui/stock-grabber.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/missing_dates.json
+          git diff --cached --quiet && echo "无变更" || (git commit -m "chore: fix missing dates" && git push)
+
+  # ── check 模式: 检查数据完整性 ─────────────────────────
+  check:
+    if: inputs.mode == 'check-errors' || inputs.mode == 'check-all'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 检查缺失日期
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          CHECK_MODE: ${{ inputs.mode == 'check-all' && 'all' || 'errors' }}
+          CHECK_YEAR: ${{ inputs.year || '2025' }}
+        run: python3 scripts/check_missing.py
+
+      - name: 提交结果
+        env:
+          GRABBER_PAT: ${{ secrets.GRABBER_PAT }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GRABBER_PAT}@github.com/hiyishui/stock-grabber.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/missing_dates.json
+          git diff --cached --quiet && echo "无变更" || (git commit -m "chore: update missing_dates.json" && git push)

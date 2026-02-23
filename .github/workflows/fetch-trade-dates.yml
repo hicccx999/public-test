@@ -1,0 +1,43 @@
+name: 更新A股交易日历
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: '0 18 * * 5'  # UTC 18:00 Fri = 北京 02:00 Sat, 每周更新一次
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  fetch-trade-dates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: pip install akshare
+
+      - name: 获取交易日历
+        run: python3 scripts/fetch_trade_dates.py
+
+      - name: 提交更新
+        env:
+          GRABBER_PAT: ${{ secrets.GRABBER_PAT }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GRABBER_PAT}@github.com/hiyishui/stock-grabber.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/trade_date.json
+          git diff --cached --quiet && echo "无变更" || (git commit -m "chore: 更新A股交易日历 $(date '+%Y-%m-%d')" && git push)

@@ -1,0 +1,43 @@
+name: 更新A股股票列表
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: '0 19 * * 0-4'  # UTC 19:00 = 北京 03:00, 周一-周五
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  fetch-stocks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: pip install akshare
+
+      - name: 获取A股股票列表
+        run: python3 scripts/fetch_stocks.py
+
+      - name: 提交更新
+        env:
+          GRABBER_PAT: ${{ secrets.GRABBER_PAT }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GRABBER_PAT}@github.com/hiyishui/stock-grabber.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/all_stocks.json
+          git diff --cached --quiet && echo "无变更" || (git commit -m "chore: 更新A股股票列表 $(date '+%Y-%m-%d')" && git push)

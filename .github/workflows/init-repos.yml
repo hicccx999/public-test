@@ -1,0 +1,53 @@
+name: 初始化股票仓库
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 检查是否还有待创建仓库
+        id: check
+        run: |
+          if [ ! -f data/repo_missing_stocks.json ]; then
+            echo "done=false" >> "$GITHUB_OUTPUT"
+            echo "repo_missing_stocks.json 不存在, 将自动生成"
+          elif python3 -c "import json; data=json.load(open('data/repo_missing_stocks.json')); exit(0 if len(data)==0 else 1)"; then
+            echo "所有仓库已创建完成!"
+            echo "done=true" >> "$GITHUB_OUTPUT"
+          else
+            COUNT=$(python3 -c "import json; print(len(json.load(open('data/repo_missing_stocks.json'))))")
+            echo "还剩 $COUNT 个仓库待创建"
+            echo "done=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 批量创建仓库 (前 100 个)
+        if: steps.check.outputs.done != 'true'
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+        run: python3 scripts/init_repos.py
+
+      - name: 提交更新
+        if: steps.check.outputs.done != 'true'
+        env:
+          GRABBER_PAT: ${{ secrets.GRABBER_PAT }}
+        run: |
+          git remote set-url origin "https://x-access-token:${GRABBER_PAT}@github.com/hiyishui/stock-grabber.git"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/repo_missing_stocks.json
+          git diff --cached --quiet && echo "无变更" || (git commit -m "chore: update repo_missing_stocks.json" && git push)
