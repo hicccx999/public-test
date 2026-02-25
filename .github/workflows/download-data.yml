@@ -192,7 +192,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 10
+      max-parallel: 40
       matrix: ${{ fromJson(needs.fix-prepare.outputs.matrix) }}
     steps:
       - name: 检出 stock-grabber
@@ -249,9 +249,64 @@ jobs:
           git add data/missing_dates.json
           git diff --cached --quiet && echo "无变更" || (git commit -m "chore: fix missing dates" && git push)
 
-  # ── check 模式: 检查数据完整性 ─────────────────────────
-  check:
+  # ── check 模式: 检查数据完整性 (分片并发) ───────────────
+  check-prepare:
     if: inputs.mode == 'check-errors' || inputs.mode == 'check-all'
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.matrix.outputs.should_run }}
+      year: ${{ steps.matrix.outputs.year }}
+      check_mode: ${{ steps.matrix.outputs.check_mode }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 生成分片矩阵
+        id: matrix
+        env:
+          MODE: ${{ inputs.mode }}
+          YEAR: ${{ inputs.year }}
+        run: python3 scripts/prepare_matrix.py
+
+  check-shard:
+    if: (inputs.mode == 'check-errors' || inputs.mode == 'check-all') && needs.check-prepare.outputs.should_run == 'true'
+    needs: check-prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 40
+      matrix: ${{ fromJson(needs.check-prepare.outputs.matrix) }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 检查数据完整性 (分片 ${{ matrix.shard }})
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          SECIDS: ${{ matrix.secids }}
+          SHARD_ID: ${{ matrix.shard }}
+          CHECK_YEAR: ${{ needs.check-prepare.outputs.year }}
+        run: python3 scripts/check_missing.py
+
+      - name: 上传分片结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-result-${{ matrix.shard }}
+          path: data/check_results/shard_${{ matrix.shard }}.json
+          retention-days: 1
+
+  check-merge:
+    if: (inputs.mode == 'check-errors' || inputs.mode == 'check-all') && needs.check-prepare.outputs.should_run == 'true' && !cancelled()
+    needs: [check-prepare, check-shard]
     runs-on: ubuntu-latest
     steps:
       - name: 检出 stock-grabber
@@ -260,13 +315,19 @@ jobs:
           repository: hiyishui/stock-grabber
           token: ${{ secrets.GRABBER_PAT }}
 
-      - name: 检查缺失日期
+      - name: 下载所有分片结果
+        uses: actions/download-artifact@v4
+        with:
+          pattern: check-result-*
+          path: data/check_results
+          merge-multiple: true
+
+      - name: 汇总检查结果
         env:
-          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
-          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
-          CHECK_MODE: ${{ inputs.mode == 'check-all' && 'all' || 'errors' }}
-          CHECK_YEAR: ${{ inputs.year || '2025' }}
-        run: python3 scripts/check_missing.py
+          MODE: check
+          CHECK_MODE: ${{ needs.check-prepare.outputs.check_mode }}
+          CHECK_YEAR: ${{ needs.check-prepare.outputs.year }}
+        run: python3 scripts/merge_results.py
 
       - name: 提交结果
         env:
