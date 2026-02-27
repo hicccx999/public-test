@@ -26,6 +26,11 @@ on:
         required: false
         type: boolean
         default: false
+      force:
+        description: '强制重新处理所有日期，忽略已完成记录 (默认 false)'
+        required: false
+        type: boolean
+        default: false
 
 env:
   TZ: Asia/Shanghai
@@ -74,6 +79,7 @@ jobs:
           token: ${{ secrets.GRABBER_PAT }}
 
       - name: 分片${{ matrix.shard }} (${{ matrix.count }}只)
+        id: convert
         env:
           REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
@@ -83,4 +89,5 @@ jobs:
             --batch '${{ matrix.secids }}' \
             --start "${{ needs.prepare.outputs.start }}" \
             --end "${{ needs.prepare.outputs.end }}" \
-            --push
+            --push \
+            ${{ inputs.force && '--force' || '' }}
