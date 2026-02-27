@@ -15,6 +15,10 @@ on:
           - errors
           - all
           - missing
+      period:
+        description: '检查周期: YYYY 或 YYYYMM (all/errors 模式有效，默认 2025)'
+        required: false
+        type: string
 
 env:
   TZ: Asia/Shanghai
@@ -80,6 +84,7 @@ jobs:
           REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
           CHECK_MODE: ${{ inputs.mode }}
+          CHECK_PERIOD: ${{ inputs.period }}
         run: python3 scripts2/check-missing-dates.py
 
       - name: 提交结果
