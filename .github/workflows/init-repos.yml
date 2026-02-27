@@ -18,6 +18,8 @@ jobs:
   init:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      ONLY_CODES_INPUT: ${{ github.event.inputs.only_codes }}
     steps:
       - name: 检出 stock-grabber
         uses: actions/checkout@v4
@@ -25,11 +27,16 @@ jobs:
           repository: hiyishui/stock-grabber
           token: ${{ secrets.GRABBER_PAT }}
 
+      - name: 显示触发参数
+        run: |
+          echo "only_codes(raw)=${ONLY_CODES_INPUT}"
+
       - name: 检查是否还有待创建仓库
         id: check
         run: |
-          if [ -n "${{ inputs.only_codes }}" ]; then
-            echo "指定代码模式: ${{ inputs.only_codes }}"
+          ONLY_CODES_TRIMMED="$(echo "${ONLY_CODES_INPUT}" | tr -d '[:space:]')"
+          if [ -n "${ONLY_CODES_TRIMMED}" ]; then
+            echo "指定代码模式: ${ONLY_CODES_TRIMMED}"
             echo "done=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -51,7 +58,7 @@ jobs:
         env:
           REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
-          ONLY_CODES: ${{ inputs.only_codes }}
+          ONLY_CODES: ${{ env.ONLY_CODES_INPUT }}
         run: python3 scripts/init_repos.py
 
       - name: 提交更新
