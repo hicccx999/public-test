@@ -1,0 +1,86 @@
+name: 生成日K线数据
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: '目标年份 YYYY (不填则转换最近一个交易日)'
+        required: false
+        type: string
+      start:
+        description: '起始日期 YYYYMMDD (不填由 year 或默认逻辑决定)'
+        required: false
+        type: string
+      end:
+        description: '结束日期 YYYYMMDD (不填由 year 或默认逻辑决定)'
+        required: false
+        type: string
+      codes:
+        description: '指定股票代码，逗号分隔 (不填则全市场)'
+        required: false
+        type: string
+      include_bj:
+        description: '是否包含北交所股票 (默认 false)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  # ── 准备阶段: 生成 matrix ──────────────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.matrix.outputs.should_run }}
+      start: ${{ steps.matrix.outputs.start }}
+      end: ${{ steps.matrix.outputs.end }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 生成分片矩阵
+        id: matrix
+        env:
+          MODE: kline
+          YEAR: ${{ inputs.year }}
+          START: ${{ inputs.start }}
+          END: ${{ inputs.end }}
+          ONLY_CODES: ${{ inputs.codes }}
+          INCLUDE_BJ: ${{ inputs.include_bj }}
+        run: python3 scripts/prepare_matrix.py
+
+  # ── 转换阶段: 每只股票一个 job ─────────────────────────
+  kline-convert:
+    if: needs.prepare.outputs.should_run == 'true'
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 200
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 生成 ${{ matrix.secid }} K线
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          KLINE_REPO_OWNER: ${{ secrets.KLINE_REPO_OWNER }}
+          KLINE_REPO_TOKEN: ${{ secrets.KLINE_REPO_TOKEN }}
+        run: |
+          python3 scripts/dat_to_kline.py "${{ matrix.secid }}" \
+            --start "${{ needs.prepare.outputs.start }}" \
+            --end "${{ needs.prepare.outputs.end }}" \
+            --push
