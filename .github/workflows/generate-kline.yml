@@ -57,14 +57,14 @@ jobs:
           INCLUDE_BJ: ${{ inputs.include_bj }}
         run: python3 scripts/prepare_matrix.py
 
-  # ── 转换阶段: 每只股票一个 job ─────────────────────────
+  # ── 转换阶段: 每个分片并发处理多只股票 ──────────────────
   kline-convert:
     if: needs.prepare.outputs.should_run == 'true'
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 200
+      max-parallel: 40
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
       - name: 检出 stock-grabber
@@ -73,12 +73,14 @@ jobs:
           repository: hiyishui/stock-grabber
           token: ${{ secrets.GRABBER_PAT }}
 
-      - name: 生成 ${{ matrix.secid }} K线
+      - name: 分片${{ matrix.shard }} (${{ matrix.count }}只)
         env:
           REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          KLINE_WORKERS: '4'
         run: |
-          python3 scripts/dat_to_kline.py "${{ matrix.secid }}" \
+          python3 scripts/dat_to_kline.py \
+            --batch '${{ matrix.secids }}' \
             --start "${{ needs.prepare.outputs.start }}" \
             --end "${{ needs.prepare.outputs.end }}" \
             --push
