@@ -5,6 +5,11 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
+      stock_grabber_ref:
+        description: 'stock-grabber 分支/标签/提交（需包含 scripts/fetch_stock_shares.py）'
+        required: false
+        default: 'main'
+        type: string
       shard_count:
         description: '分片数量'
         required: false
@@ -35,8 +40,17 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: hiyishui/stock-grabber
+          ref: ${{ inputs.stock_grabber_ref }}
           token: ${{ secrets.GRABBER_PAT }}
           path: stock-grabber
+
+      - name: 校验脚本存在
+        run: |
+          test -f stock-grabber/scripts/fetch_stock_shares.py || {
+            echo "未找到 stock-grabber/scripts/fetch_stock_shares.py"
+            echo "请确认 stock_grabber_ref=${{ inputs.stock_grabber_ref }} 对应分支已包含该脚本"
+            exit 1
+          }
 
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
@@ -89,8 +103,17 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: hiyishui/stock-grabber
+          ref: ${{ inputs.stock_grabber_ref }}
           token: ${{ secrets.GRABBER_PAT }}
           path: stock-grabber
+
+      - name: 校验脚本存在
+        run: |
+          test -f stock-grabber/scripts/fetch_stock_shares.py || {
+            echo "未找到 stock-grabber/scripts/fetch_stock_shares.py"
+            echo "请确认 stock_grabber_ref=${{ inputs.stock_grabber_ref }} 对应分支已包含该脚本"
+            exit 1
+          }
 
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
