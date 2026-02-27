@@ -77,8 +77,6 @@ jobs:
         env:
           REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
-          KLINE_REPO_OWNER: ${{ secrets.KLINE_REPO_OWNER }}
-          KLINE_REPO_TOKEN: ${{ secrets.KLINE_REPO_TOKEN }}
         run: |
           python3 scripts/dat_to_kline.py "${{ matrix.secid }}" \
             --start "${{ needs.prepare.outputs.start }}" \
