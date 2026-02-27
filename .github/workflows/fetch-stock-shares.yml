@@ -1,0 +1,109 @@
+name: 更新股票股本数据
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      shard_count:
+        description: '分片数量'
+        required: false
+        default: '40'
+        type: string
+      page_workers:
+        description: '分页抓取并发数'
+        required: false
+        default: '12'
+        type: string
+      only_secids:
+        description: '可选：仅处理指定股票，逗号分隔，只支持 6 位数字（如 600000,300682,920001）'
+        required: false
+        default: ''
+        type: string
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  fetch-and-prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.matrix.outputs.should_run }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 抓取全部股本分页并生成索引
+        env:
+          MODE: fetch-all
+          SHARES_PAGE_WORKERS: ${{ inputs.page_workers }}
+          ONLY_SECIDS: ${{ inputs.only_secids }}
+        run: python3 scripts/fetch_stock_shares.py
+
+      - name: 生成分片矩阵
+        id: matrix
+        env:
+          MODE: prepare-matrix
+          SHARD_COUNT: ${{ inputs.shard_count }}
+          ONLY_SECIDS: ${{ inputs.only_secids }}
+        run: python3 scripts/fetch_stock_shares.py
+
+      - name: 上传股本临时分页
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-shares-pages
+          path: data/stock_shares_pages
+          retention-days: 2
+
+      - name: 上传股本索引
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-shares-index
+          path: |
+            data/stock_shares_index.json
+            data/stock_shares_summary.json
+          retention-days: 2
+
+  push-shard:
+    if: needs.fetch-and-prepare.outputs.should_run == 'true'
+    needs: fetch-and-prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 40
+      matrix: ${{ fromJson(needs.fetch-and-prepare.outputs.matrix) }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 下载股本索引
+        uses: actions/download-artifact@v4
+        with:
+          name: stock-shares-index
+          path: .
+
+      - name: 按分片推送股本数据 (分片 ${{ matrix.shard }})
+        env:
+          MODE: push-shard
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          SECIDS: ${{ matrix.secids }}
+          SHARD_ID: ${{ matrix.shard }}
+        run: python3 scripts/fetch_stock_shares.py
