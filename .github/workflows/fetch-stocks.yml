@@ -30,6 +30,9 @@ jobs:
         run: pip install akshare
 
       - name: 获取A股股票列表
+        env:
+          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
         run: python3 scripts/fetch_stocks.py
 
       - name: 提交更新
@@ -39,5 +42,5 @@ jobs:
           git remote set-url origin "https://x-access-token:${GRABBER_PAT}@github.com/hiyishui/stock-grabber.git"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/all_stocks.json
+          git add data/all_stocks.json data/repo_missing_stocks.json
           git diff --cached --quiet && echo "无变更" || (git commit -m "chore: 更新A股股票列表 $(date '+%Y-%m-%d')" && git push)
