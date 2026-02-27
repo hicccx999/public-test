@@ -1,4 +1,4 @@
-name: 更新股票股本数据
+name: 更新股票股本结构
 permissions:
   contents: write
 
@@ -36,6 +36,7 @@ jobs:
         with:
           repository: hiyishui/stock-grabber
           token: ${{ secrets.GRABBER_PAT }}
+          path: stock-grabber
 
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
@@ -47,6 +48,7 @@ jobs:
           MODE: fetch-all
           SHARES_PAGE_WORKERS: ${{ inputs.page_workers }}
           ONLY_SECIDS: ${{ inputs.only_secids }}
+        working-directory: stock-grabber
         run: python3 scripts/fetch_stock_shares.py
 
       - name: 生成分片矩阵
@@ -55,13 +57,14 @@ jobs:
           MODE: prepare-matrix
           SHARD_COUNT: ${{ inputs.shard_count }}
           ONLY_SECIDS: ${{ inputs.only_secids }}
+        working-directory: stock-grabber
         run: python3 scripts/fetch_stock_shares.py
 
       - name: 上传股本临时分页
         uses: actions/upload-artifact@v4
         with:
           name: stock-shares-pages
-          path: data/stock_shares_pages
+          path: stock-grabber/data/stock_shares_pages
           retention-days: 2
 
       - name: 上传股本索引
@@ -69,8 +72,8 @@ jobs:
         with:
           name: stock-shares-index
           path: |
-            data/stock_shares_index.json
-            data/stock_shares_summary.json
+            stock-grabber/data/stock_shares_index.json
+            stock-grabber/data/stock_shares_summary.json
           retention-days: 2
 
   push-shard:
@@ -87,6 +90,7 @@ jobs:
         with:
           repository: hiyishui/stock-grabber
           token: ${{ secrets.GRABBER_PAT }}
+          path: stock-grabber
 
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
@@ -106,4 +110,5 @@ jobs:
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
           SECIDS: ${{ matrix.secids }}
           SHARD_ID: ${{ matrix.shard }}
+        working-directory: stock-grabber
         run: python3 scripts/fetch_stock_shares.py
