@@ -4,6 +4,12 @@ permissions:
 
 on:
   workflow_dispatch:
+    inputs:
+      only_codes:
+        description: '可选：仅初始化指定股票，逗号分隔，6位纯数字（如 600000,300682,920001）'
+        required: false
+        default: ''
+        type: string
 
 env:
   TZ: Asia/Shanghai
@@ -22,6 +28,12 @@ jobs:
       - name: 检查是否还有待创建仓库
         id: check
         run: |
+          if [ -n "${{ inputs.only_codes }}" ]; then
+            echo "指定代码模式: ${{ inputs.only_codes }}"
+            echo "done=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           if [ ! -f data/repo_missing_stocks.json ]; then
             echo "done=false" >> "$GITHUB_OUTPUT"
             echo "repo_missing_stocks.json 不存在, 将自动生成"
@@ -34,11 +46,12 @@ jobs:
             echo "done=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 批量创建仓库 (前 100 个)
+      - name: 创建仓库（支持指定代码/默认批量）
         if: steps.check.outputs.done != 'true'
         env:
           REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          ONLY_CODES: ${{ inputs.only_codes }}
         run: python3 scripts/init_repos.py
 
       - name: 提交更新
