@@ -126,6 +126,30 @@ jobs:
           name: stock-shares-index
           path: .
 
+      - name: 归位股本索引文件
+        run: |
+          mkdir -p stock-grabber/data
+
+          if [ -f stock_shares_index.json ]; then
+            mv stock_shares_index.json stock-grabber/data/stock_shares_index.json
+          fi
+          if [ -f stock_shares_summary.json ]; then
+            mv stock_shares_summary.json stock-grabber/data/stock_shares_summary.json
+          fi
+
+          if [ -f data/stock_shares_index.json ]; then
+            cp data/stock_shares_index.json stock-grabber/data/stock_shares_index.json
+          fi
+          if [ -f data/stock_shares_summary.json ]; then
+            cp data/stock_shares_summary.json stock-grabber/data/stock_shares_summary.json
+          fi
+
+          if [ ! -f stock-grabber/data/stock_shares_index.json ]; then
+            echo "未找到 stock_shares_index.json，当前文件结构:"
+            find . -maxdepth 4 -type f | sort
+            exit 1
+          fi
+
       - name: 按分片推送股本数据 (分片 ${{ matrix.shard }})
         env:
           MODE: push-shard
