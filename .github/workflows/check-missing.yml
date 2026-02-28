@@ -206,7 +206,7 @@ jobs:
           retention-days: 1
 
   fix-merge:
-    if: inputs.mode == 'missing' && needs.fix.outputs.has_missing == 'true'
+    if: always() && !cancelled() && inputs.mode == 'missing' && needs.fix.outputs.has_missing == 'true'
     needs: [fix, fix-shard]
     runs-on: ubuntu-latest
     steps:
