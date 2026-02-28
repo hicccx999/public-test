@@ -49,3 +49,63 @@ jobs:
           SECIDS: ${{ matrix.secids }}
           SHARD_ID: ${{ matrix.shard }}
         run: python3 scripts/migrate_kline_done.py
+
+      - name: 上传分片结果
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migrate-result-${{ matrix.shard }}
+          path: data/migrate_results/shard_${{ matrix.shard }}.json
+          retention-days: 3
+          if-no-files-found: ignore
+
+  report:
+    if: always() && !cancelled() && needs.prepare.outputs.should_run == 'true'
+    needs: [prepare, migrate-shard]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载所有分片结果
+        uses: actions/download-artifact@v4
+        with:
+          pattern: migrate-result-*
+          path: results
+          merge-multiple: true
+
+      - name: 汇总报告
+        run: |
+          python3 -c "
+import json, glob, os
+files = sorted(glob.glob('results/shard_*.json'))
+if not files:
+    print('未找到分片结果')
+    exit(0)
+totals = {'migrated': 0, 'skipped': 0, 'no-file': 0, 'failed': 0}
+all_no_file = []
+for f in files:
+    data = json.load(open(f))
+    for k in totals:
+        totals[k] += data['counts'].get(k, 0)
+    all_no_file.extend(data.get('no_file_list', []))
+all_no_file.sort()
+print('=' * 60)
+print(f'迁移汇总: {len(files)} 个分片')
+print(f'  迁移: {totals[\"migrated\"]}, 跳过: {totals[\"skipped\"]}, 无文件: {totals[\"no-file\"]}, 失败: {totals[\"failed\"]}')
+if all_no_file:
+    print(f'\n无 kline-done.json 的股票 ({len(all_no_file)} 只):')
+    for i in range(0, len(all_no_file), 10):
+        print('  ' + ', '.join(all_no_file[i:i+10]))
+print('=' * 60)
+summary = os.environ.get('GITHUB_STEP_SUMMARY', '')
+if summary:
+    with open(summary, 'a') as fp:
+        fp.write('## 迁移 kline-done.json 汇总\n\n')
+        fp.write(f'| 指标 | 数量 |\n|------|------|\n')
+        fp.write(f'| 迁移 | {totals[\"migrated\"]} |\n')
+        fp.write(f'| 跳过 | {totals[\"skipped\"]} |\n')
+        fp.write(f'| 无文件 | {totals[\"no-file\"]} |\n')
+        fp.write(f'| 失败 | {totals[\"failed\"]} |\n\n')
+        if all_no_file:
+            fp.write(f'<details><summary>无 kline-done.json 的股票 ({len(all_no_file)} 只)</summary>\n\n')
+            fp.write('\\\n'.join([', '.join(all_no_file[i:i+10]) for i in range(0, len(all_no_file), 10)]))
+            fp.write('\n\n</details>\n')
+"
