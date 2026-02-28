@@ -66,3 +66,33 @@ jobs:
           DATE: ${{ needs.prepare.outputs.date }}
           FORCE: ${{ inputs.force }}
         run: python3 scripts/download_data.py
+
+      - name: 上传分片结果
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dl-result-${{ matrix.shard }}
+          path: data/dl_results/shard_${{ matrix.shard }}.json
+          retention-days: 3
+          if-no-files-found: ignore
+
+  report:
+    if: always() && !cancelled() && needs.prepare.outputs.should_run == 'true'
+    needs: [prepare, download]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 下载所有分片结果
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dl-result-*
+          path: data/dl_results
+          merge-multiple: true
+
+      - name: 汇总报告
+        run: python3 scripts/merge_dl_report.py
