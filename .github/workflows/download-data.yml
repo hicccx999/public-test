@@ -8,7 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       date:
-        description: '目标日期: YYYY(年) / YYYYMM(月) / YYYYMMDD(日), 留空=当天'
+        description: '日期: YYYY/YYYYMM/YYYYMMDD, 多个逗号分隔, 留空=当天'
+        required: false
+        type: string
+      codes:
+        description: '股票代码(纯数字), 逗号分隔, 留空=全部'
         required: false
         type: string
       force:
@@ -39,6 +43,7 @@ jobs:
         env:
           MODE: download
           DATE: ${{ inputs.date }}
+          ONLY_CODES: ${{ inputs.codes }}
           FORCE: ${{ inputs.force }}
         run: python3 scripts/prepare_matrix.py
 
@@ -95,4 +100,7 @@ jobs:
           merge-multiple: true
 
       - name: 汇总报告
+        env:
+          INPUT_DATE: ${{ inputs.date }}
+          INPUT_CODES: ${{ inputs.codes }}
         run: python3 scripts/merge_dl_report.py
