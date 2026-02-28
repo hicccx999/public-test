@@ -100,13 +100,13 @@ jobs:
           YEAR: ${{ inputs.year }}
         run: python3 scripts/prepare_matrix.py
 
-  year-download:
+  year-shard:
     if: inputs.mode == 'by-year' && needs.year-prepare.outputs.should_run == 'true'
     needs: year-prepare
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 200
+      max-parallel: 40
       matrix: ${{ fromJson(needs.year-prepare.outputs.matrix) }}
     steps:
       - name: 检出 stock-grabber
@@ -115,26 +115,27 @@ jobs:
           repository: hiyishui/stock-grabber
           token: ${{ secrets.GRABBER_PAT }}
 
-      - name: 下载 ${{ matrix.secid }} 全年数据
+      - name: 下载全年数据 (分片 ${{ matrix.shard }}, ${{ matrix.count }} 只)
         env:
           REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
           MODE: by-year
-          SECIDS: '["${{ matrix.secid }}"]'
+          SECIDS: ${{ matrix.secids }}
+          SHARD_ID: ${{ matrix.shard }}
           YEAR: ${{ needs.year-prepare.outputs.year }}
         run: python3 scripts/download_data.py
 
-      - name: 上传成功标记
-        if: success()
+      - name: 上传分片结果
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: year-ok-${{ matrix.secid }}
-          path: data/year_results/${{ matrix.secid }}.txt
+          name: year-result-${{ matrix.shard }}
+          path: data/year_results/shard_${{ matrix.shard }}.json
           retention-days: 1
 
   year-merge:
-    if: inputs.mode == 'by-year' && needs.year-prepare.outputs.should_run == 'true' && !cancelled()
-    needs: [year-prepare, year-download]
+    if: always() && !cancelled() && inputs.mode == 'by-year' && needs.year-prepare.outputs.should_run == 'true'
+    needs: [year-prepare, year-shard]
     runs-on: ubuntu-latest
     steps:
       - name: 检出 stock-grabber
@@ -143,10 +144,10 @@ jobs:
           repository: hiyishui/stock-grabber
           token: ${{ secrets.GRABBER_PAT }}
 
-      - name: 下载所有成功标记
+      - name: 下载所有分片结果
         uses: actions/download-artifact@v4
         with:
-          pattern: year-ok-*
+          pattern: year-result-*
           path: data/year_results
           merge-multiple: true
 
