@@ -5,16 +5,8 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
-      year:
-        description: '目标年份 YYYY (不填则转换最近一个交易日)'
-        required: false
-        type: string
-      start:
-        description: '起始日期 YYYYMMDD (不填由 year 或默认逻辑决定)'
-        required: false
-        type: string
-      end:
-        description: '结束日期 YYYYMMDD (不填由 year 或默认逻辑决定)'
+      date:
+        description: '目标日期: YYYY(年) / YYYYMM(月) / YYYYMMDD(日), 留空=当天'
         required: false
         type: string
       codes:
@@ -27,7 +19,7 @@ on:
         type: boolean
         default: false
       force:
-        description: '强制重新处理所有日期，忽略已完成记录 (默认 false)'
+        description: '强制重新处理，忽略已完成记录 (默认 false)'
         required: false
         type: boolean
         default: false
@@ -55,9 +47,7 @@ jobs:
         id: matrix
         env:
           MODE: kline
-          YEAR: ${{ inputs.year }}
-          START: ${{ inputs.start }}
-          END: ${{ inputs.end }}
+          DATE: ${{ inputs.date }}
           ONLY_CODES: ${{ inputs.codes }}
           INCLUDE_BJ: ${{ inputs.include_bj }}
         run: python3 scripts/prepare_matrix.py
@@ -84,10 +74,43 @@ jobs:
           REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
           KLINE_WORKERS: '4'
+          SHARD_ID: ${{ matrix.shard }}
         run: |
           python3 scripts/dat_to_kline.py \
             --batch '${{ matrix.secids }}' \
             --start "${{ needs.prepare.outputs.start }}" \
             --end "${{ needs.prepare.outputs.end }}" \
             --push \
+            --shard-id "${{ matrix.shard }}" \
             ${{ inputs.force && '--force' || '' }}
+
+      - name: 上传分片结果
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kline-result-${{ matrix.shard }}
+          path: data/kline_results/shard_${{ matrix.shard }}.json
+          retention-days: 3
+          if-no-files-found: ignore
+
+  # ── 汇总阶段: 合并所有分片结果 ─────────────────────────
+  report:
+    if: always() && !cancelled() && needs.prepare.outputs.should_run == 'true'
+    needs: [prepare, kline-convert]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 下载所有分片结果
+        uses: actions/download-artifact@v4
+        with:
+          pattern: kline-result-*
+          path: data/kline_results
+          merge-multiple: true
+
+      - name: 汇总报告
+        run: python3 scripts/merge_kline_report.py
