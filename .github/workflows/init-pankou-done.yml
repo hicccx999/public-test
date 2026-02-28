@@ -1,21 +1,9 @@
-name: 下载盘口数据
+name: 初始化 pankou_done.json
 permissions:
   contents: write
 
 on:
-#   schedule:
-#     - cron: '0 8 * * 1-5'  # UTC 08:00 = 北京 16:00, 工作日收盘后
   workflow_dispatch:
-    inputs:
-      date:
-        description: '目标日期: YYYY(年) / YYYYMM(月) / YYYYMMDD(日), 留空=当天'
-        required: false
-        type: string
-      force:
-        description: '强制重下载已完成的日期'
-        required: false
-        default: false
-        type: boolean
 
 env:
   TZ: Asia/Shanghai
@@ -25,7 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.matrix.outputs.should_run }}
-      date: ${{ steps.matrix.outputs.date }}
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - name: 检出 stock-grabber
@@ -37,12 +24,10 @@ jobs:
       - name: 生成分片矩阵
         id: matrix
         env:
-          MODE: download
-          DATE: ${{ inputs.date }}
-          FORCE: ${{ inputs.force }}
+          MODE: init-done
         run: python3 scripts/prepare_matrix.py
 
-  download:
+  init-shard:
     if: needs.prepare.outputs.should_run == 'true'
     needs: prepare
     runs-on: ubuntu-latest
@@ -57,12 +42,10 @@ jobs:
           repository: hiyishui/stock-grabber
           token: ${{ secrets.GRABBER_PAT }}
 
-      - name: 下载数据 (分片 ${{ matrix.shard }}, ${{ matrix.count }} 只)
+      - name: 初始化 pankou_done (分片 ${{ matrix.shard }}, ${{ matrix.count }} 只)
         env:
           REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
           REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
           SECIDS: ${{ matrix.secids }}
           SHARD_ID: ${{ matrix.shard }}
-          DATE: ${{ needs.prepare.outputs.date }}
-          FORCE: ${{ inputs.force }}
-        run: python3 scripts/download_data.py
+        run: python3 scripts/init_pankou_done.py
