@@ -4,7 +4,8 @@ permissions:
 
 on:
   schedule:
-    - cron: '0 19 * * 0-4'  # UTC 19:00 = 北京 03:00, 周一-周五
+    # 每个工作日北京时间 3:00 执行（UTC 前一天 19:00，周日~周四）
+    - cron: '0 19 * * 0-4'
   workflow_dispatch:
 
 env:
