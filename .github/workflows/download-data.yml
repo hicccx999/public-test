@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       date:
-        description: '日期: YYYY/YYYYMM/YYYYMMDD, 多个逗号分隔, 留空=当天'
+        description: '日期: YYYYMMDD 或 YYYYMMDD~YYYYMMDD, 多个逗号分隔, 留空=当天'
         required: false
         type: string
       codes:
