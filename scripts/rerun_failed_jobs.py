@@ -153,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-run-attempt",
         type=int,
-        default=int(os.getenv("MAX_RUN_ATTEMPT", "96")),
+        default=int(os.getenv("MAX_RUN_ATTEMPT", "6")),
         help="Do not rerun if run_attempt is >= this value. Env: MAX_RUN_ATTEMPT",
     )
     parser.add_argument(
