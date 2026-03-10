@@ -72,7 +72,7 @@ jobs:
           DATE_IS_DEFAULT: ${{ inputs.date == '' }}
           FORCE: ${{ inputs.force }}
           CHECK_DAT_COMPLETENESS: "true"
-          DAT_LAST_TS_MIN: "145500"
+          DAT_LAST_TS_MIN: "144500"
           DAT_ACTIVE_MIN_SIZE: "2000"
           AUTO_KLINE_ON_DEFAULT_DATE: "true"
         run: python3 scripts/download_data.py
