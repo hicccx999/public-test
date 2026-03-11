@@ -65,8 +65,8 @@ jobs:
 
       - name: 下载数据 (分片 ${{ matrix.shard }}, ${{ matrix.count }} 只)
         env:
-          REPO_OWNER: ${{ secrets.LARKSELF_OWNER }}
-          REPO_TOKEN: ${{ secrets.LARKSELF_TOKEN }}
+          REPO_OWNER: larkself
+          REPO_TOKEN: ${{ secrets.LARKSELF_PAT }}
           SECIDS: ${{ matrix.secids }}
           SHARD_ID: ${{ matrix.shard }}
           DATE: ${{ needs.prepare.outputs.date }}
