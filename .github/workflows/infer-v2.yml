@@ -1,0 +1,217 @@
+name: V2模型推理
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      infer_secids:
+        description: "推理股票列表(secid/代码, 逗号分隔)"
+        required: true
+        type: string
+      infer_days:
+        description: "推理最近N个交易日"
+        required: false
+        default: "20"
+        type: string
+  workflow_call:
+    inputs:
+      infer_secids:
+        description: "推理股票列表(secid/代码, 逗号分隔)"
+        required: true
+        type: string
+      infer_days:
+        description: "推理最近N个交易日"
+        required: false
+        default: "20"
+        type: string
+    secrets:
+      GRABBER_PAT:
+        required: true
+      TARGET_REPO_OWNER:
+        required: true
+      TARGET_REPO_TOKEN:
+        required: true
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  infer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: 检出 public-test
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+          path: stock-grabber
+
+      - name: 检出 stock-mining
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-mining
+          token: ${{ secrets.GRABBER_PAT }}
+          path: stock-mining
+          ref: main
+
+      - name: 检出 gp-report
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/gp-report
+          token: ${{ secrets.GRABBER_PAT }}
+          path: gp-report
+          ref: main
+          fetch-depth: 0
+
+      - name: 安装推理依赖
+        run: |
+          pip install --upgrade pip
+          pip install numpy pandas scikit-learn lightgbm xgboost pyarrow zstandard
+
+      - name: 校验模型文件存在
+        run: |
+          set -Eeuo pipefail
+          for f in models/v2/gate_xgb.json models/v2/stage_lgbm.txt; do
+            if [[ ! -f "$GITHUB_WORKSPACE/stock-mining/$f" ]]; then
+              echo "::error::缺少模型文件: stock-mining/$f，请先运行训练 workflow"
+              exit 1
+            fi
+          done
+          echo "模型文件校验通过"
+
+      - name: 生成推理列表
+        env:
+          INPUT_INFER_SECIDS: ${{ inputs.infer_secids }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.work"
+          python3 "$GITHUB_WORKSPACE/scripts/make_secid_batches.py" \
+            --all-stocks-json "$GITHUB_WORKSPACE/stock-grabber/data/all_stocks.json" \
+            --secids "$INPUT_INFER_SECIDS" \
+            --batch-size 100000 \
+            --max-batches 1 \
+            --output "$GITHUB_WORKSPACE/.work/infer_secids.json"
+
+      - name: 推理并生成报告
+        env:
+          TARGET_REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          TARGET_REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          INFER_DAYS: ${{ inputs.infer_days }}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          STOCK_GRABBER="$ROOT/stock-grabber"
+          STOCK_MINING="$ROOT/stock-mining"
+          GP_REPORT="$ROOT/gp-report"
+          REPO_CACHE="$ROOT/.work/repo_cache"
+
+          if [[ -z "${TARGET_REPO_OWNER:-}" || -z "${TARGET_REPO_TOKEN:-}" ]]; then
+            echo "::error::缺少 TARGET_REPO_OWNER 或 TARGET_REPO_TOKEN secret"
+            exit 1
+          fi
+
+          INFER_JSON=$(python3 - <<'PY'
+          import json, os
+          p = os.path.join(os.environ["GITHUB_WORKSPACE"], ".work", "infer_secids.json")
+          d = json.load(open(p, encoding="utf-8"))
+          print(json.dumps(d["secids"], ensure_ascii=False))
+          PY
+          )
+
+          if [[ "$INFER_JSON" == "[]" ]]; then
+            echo "推理股票列表为空，退出"
+            exit 1
+          fi
+
+          # 同步推理股票repo
+          INFER_JSON="$INFER_JSON" REPO_CACHE="$REPO_CACHE" TARGET_REPO_OWNER="$TARGET_REPO_OWNER" TARGET_REPO_TOKEN="$TARGET_REPO_TOKEN" \
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          secids = json.loads(os.environ["INFER_JSON"])
+          cache = Path(os.environ["REPO_CACHE"])
+          owner = os.environ["TARGET_REPO_OWNER"]
+          token = os.environ["TARGET_REPO_TOKEN"]
+          cache.mkdir(parents=True, exist_ok=True)
+
+          for sid in secids:
+              target = cache / sid
+              url = f"https://x-access-token:{token}@github.com/{owner}/{sid}.git"
+              if target.exists():
+                  subprocess.run(["git", "-C", str(target), "fetch", "--depth", "1", "origin"], check=True)
+                  branch = subprocess.check_output(
+                      ["git", "-C", str(target), "rev-parse", "--abbrev-ref", "HEAD"], text=True
+                  ).strip()
+                  subprocess.run(["git", "-C", str(target), "reset", "--hard", f"origin/{branch}"], check=True)
+              else:
+                  subprocess.run(["git", "clone", "--depth", "1", url, str(target)], check=True)
+          PY
+
+          export INFER_JSON
+          mapfile -t INFER_SECIDS < <(python3 - <<'PY'
+          import json, os
+          for sid in json.loads(os.environ["INFER_JSON"]):
+              print(sid)
+          PY
+          )
+          echo "推理股票: ${INFER_SECIDS[*]}"
+
+          (
+            cd "$STOCK_MINING"
+            PYTHONPATH="$STOCK_GRABBER/tools:$STOCK_MINING:${PYTHONPATH:-}" \
+              python3 "scripts/analyze_stage.py" \
+                "${INFER_SECIDS[@]}" \
+                --days "$INFER_DAYS" \
+                --model-dir "models/v2" \
+                --repo-root "$REPO_CACHE" \
+                --no-update-repo
+          )
+
+          mkdir -p "$GP_REPORT/reports"
+          for sid in "${INFER_SECIDS[@]}"; do
+            src="$STOCK_MINING/data/reports/${sid}_stage_analysis.md"
+            if [[ -f "$src" ]]; then
+              cp "$src" "$GP_REPORT/reports/"
+            else
+              echo "缺少报告: $src"
+              exit 1
+            fi
+          done
+
+      - name: 提交推理报告到 gp-report/reports
+        run: |
+          set -Eeuo pipefail
+          cd "$GITHUB_WORKSPACE/gp-report"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add reports/*_stage_analysis.md
+          if git diff --staged --quiet; then
+            echo "gp-report/reports 无变化"
+          else
+            git commit -m "chore: 更新阶段推理报告 ($(date +%F))"
+            git push origin HEAD:main
+          fi
+
+      - name: 上传推理产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: infer-v2-output
+          path: |
+            stock-mining/data/reports/*_stage_analysis.md
+          if-no-files-found: ignore
+          retention-days: 7
