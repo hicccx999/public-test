@@ -82,7 +82,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: 检出 stock-grabber
         uses: actions/checkout@v4
@@ -116,19 +115,24 @@ jobs:
 
       - name: 生成训练批次
         id: batches
+        env:
+          INPUT_INCLUDE_BJ: ${{ inputs.include_bj }}
+          INPUT_REPO_SECIDS: ${{ inputs.repo_secids }}
+          INPUT_BATCH_SIZE: ${{ inputs.batch_size }}
+          INPUT_MAX_BATCHES: ${{ inputs.max_batches }}
         run: |
           set -Eeuo pipefail
           mkdir -p "$GITHUB_WORKSPACE/.work"
           INCLUDE_BJ_FLAG=""
-          if [[ "${{ inputs.include_bj }}" == "true" ]]; then
+          if [[ "$INPUT_INCLUDE_BJ" == "true" ]]; then
             INCLUDE_BJ_FLAG="--include-bj"
           fi
 
           python3 "$GITHUB_WORKSPACE/scripts/make_secid_batches.py" \
             --all-stocks-json "$GITHUB_WORKSPACE/stock-grabber/data/all_stocks.json" \
-            --secids "${{ inputs.repo_secids }}" \
-            --batch-size "${{ inputs.batch_size }}" \
-            --max-batches "${{ inputs.max_batches }}" \
+            --secids "$INPUT_REPO_SECIDS" \
+            --batch-size "$INPUT_BATCH_SIZE" \
+            --max-batches "$INPUT_MAX_BATCHES" \
             $INCLUDE_BJ_FLAG \
             --output "$GITHUB_WORKSPACE/.work/train_batches.json"
 
@@ -146,8 +150,10 @@ jobs:
           PY
 
       - name: 校验批次非空
+        env:
+          TOTAL_SECIDS: ${{ steps.batches.outputs.total_secids }}
         run: |
-          if [[ "${{ steps.batches.outputs.total_secids }}" == "0" ]]; then
+          if [[ "$TOTAL_SECIDS" == "0" ]]; then
             echo "训练股票列表为空，退出"
             exit 1
           fi
@@ -359,11 +365,13 @@ jobs:
           fi
 
       - name: 生成推理列表
+        env:
+          INPUT_INFER_SECIDS: ${{ inputs.infer_secids }}
         run: |
           set -Eeuo pipefail
           python3 "$GITHUB_WORKSPACE/scripts/make_secid_batches.py" \
             --all-stocks-json "$GITHUB_WORKSPACE/stock-grabber/data/all_stocks.json" \
-            --secids "${{ inputs.infer_secids }}" \
+            --secids "$INPUT_INFER_SECIDS" \
             --batch-size 100000 \
             --max-batches 1 \
             --output "$GITHUB_WORKSPACE/.work/infer_secids.json"
