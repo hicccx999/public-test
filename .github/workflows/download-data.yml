@@ -52,6 +52,9 @@ jobs:
     if: needs.prepare.outputs.should_run == 'true'
     needs: prepare
     runs-on: ubuntu-latest
+    concurrency:
+      group: download-data-${{ matrix.date }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       max-parallel: 40
@@ -63,25 +66,25 @@ jobs:
           repository: hiyishui/stock-grabber
           token: ${{ secrets.GRABBER_PAT }}
 
-      - name: 下载数据 (分片 ${{ matrix.shard }}, ${{ matrix.count }} 只)
+      - name: 下载数据 (日期 ${{ matrix.date }}, 分片 ${{ matrix.shard }}, ${{ matrix.count }} 只)
         env:
           SECIDS: ${{ matrix.secids }}
           SHARD_ID: ${{ matrix.shard }}
-          DATE: ${{ needs.prepare.outputs.date }}
+          DATE: ${{ matrix.date }}
           FORCE: ${{ inputs.force }}
           CHECK_DAT_COMPLETENESS: "true"
           DAT_LAST_TS_MIN: "144500"
           DAT_ACTIVE_MIN_SIZE: "2000"
         run: python3 scripts/download_data.py
 
-      - name: 上传下载的 dat 文件
-        if: always() && !cancelled()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dat-shard-${{ matrix.shard }}
-          path: data/dl_output/
-          retention-days: 3
-          if-no-files-found: ignore
+      - name: 本分片完成后推送日期仓库
+        if: success() && !cancelled()
+        env:
+          REPO_OWNER: larkself
+          REPO_TOKEN: ${{ secrets.LARKSELF_PAT }}
+          DATA_DIR: data/dl_output
+          PUSH_BATCH_SIZE: "500"
+        run: python3 scripts/push_date_repo.py
 
       - name: 上传分片结果
         if: always() && !cancelled()
@@ -92,34 +95,9 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
 
-  push:
-    if: always() && !cancelled() && needs.prepare.outputs.should_run == 'true'
-    needs: [prepare, download]
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出 stock-grabber
-        uses: actions/checkout@v4
-        with:
-          repository: hiyishui/stock-grabber
-          token: ${{ secrets.GRABBER_PAT }}
-
-      - name: 下载所有分片 dat 文件
-        uses: actions/download-artifact@v4
-        with:
-          pattern: dat-shard-*
-          path: data/dl_output
-          merge-multiple: true
-
-      - name: 统一推送到日期仓库
-        env:
-          REPO_OWNER: larkself
-          REPO_TOKEN: ${{ secrets.LARKSELF_PAT }}
-          DATA_DIR: data/dl_output
-        run: python3 scripts/push_date_repo.py
-
   report:
     if: always() && !cancelled() && needs.prepare.outputs.should_run == 'true'
-    needs: [prepare, download, push]
+    needs: [prepare, download]
     runs-on: ubuntu-latest
     steps:
       - name: 检出 stock-grabber
