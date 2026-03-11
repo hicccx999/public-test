@@ -1,0 +1,407 @@
+name: V2特征工程
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "模式: full=从0开始, incremental=增量"
+        required: true
+        default: "incremental"
+        type: choice
+        options:
+          - full
+          - incremental
+      date_range:
+        description: "增量下载日期范围 (YYYYMMDD 或 YYYYMMDD~YYYYMMDD, 可留空)"
+        required: false
+        type: string
+      repo_secids:
+        description: "股票列表(secid/代码, 逗号分隔, 留空=全量)"
+        required: false
+        type: string
+      include_bj:
+        description: "repo_secids 为空时，是否包含北交所"
+        required: false
+        default: false
+        type: boolean
+      batch_size:
+        description: "每批股票数"
+        required: false
+        default: "20"
+        type: string
+      max_batches:
+        description: "最多批次数(0=全部)"
+        required: false
+        default: "0"
+        type: string
+      force_download:
+        description: "下载阶段是否强制覆盖已完成日期"
+        required: false
+        default: false
+        type: boolean
+      exclude_days:
+        description: "数据集排除最近N个交易日(防止标签不完整)"
+        required: false
+        default: "20"
+        type: string
+  workflow_call:
+    inputs:
+      mode:
+        required: true
+        type: string
+      date_range:
+        required: false
+        type: string
+      repo_secids:
+        required: false
+        type: string
+      include_bj:
+        required: false
+        default: false
+        type: boolean
+      batch_size:
+        required: false
+        default: "20"
+        type: string
+      max_batches:
+        required: false
+        default: "0"
+        type: string
+      force_download:
+        required: false
+        default: false
+        type: boolean
+      exclude_days:
+        required: false
+        default: "20"
+        type: string
+    secrets:
+      GRABBER_PAT:
+        required: true
+      TARGET_REPO_OWNER:
+        required: true
+      TARGET_REPO_TOKEN:
+        required: true
+
+env:
+  TZ: Asia/Shanghai
+
+jobs:
+  features:
+    runs-on: ubuntu-latest
+    timeout-minutes: 600
+    steps:
+      - name: 检出 public-test
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+          path: stock-grabber
+
+      - name: 检出 stock-mining
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-mining
+          token: ${{ secrets.GRABBER_PAT }}
+          path: stock-mining
+          ref: main
+          fetch-depth: 0
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install numpy pandas scikit-learn lightgbm xgboost pyarrow zstandard
+
+      - name: 生成批次
+        id: batches
+        env:
+          INPUT_INCLUDE_BJ: ${{ inputs.include_bj }}
+          INPUT_REPO_SECIDS: ${{ inputs.repo_secids }}
+          INPUT_BATCH_SIZE: ${{ inputs.batch_size }}
+          INPUT_MAX_BATCHES: ${{ inputs.max_batches }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.work"
+          INCLUDE_BJ_FLAG=""
+          if [[ "$INPUT_INCLUDE_BJ" == "true" ]]; then
+            INCLUDE_BJ_FLAG="--include-bj"
+          fi
+
+          python3 "$GITHUB_WORKSPACE/scripts/make_secid_batches.py" \
+            --all-stocks-json "$GITHUB_WORKSPACE/stock-grabber/data/all_stocks.json" \
+            --secids "$INPUT_REPO_SECIDS" \
+            --batch-size "$INPUT_BATCH_SIZE" \
+            --max-batches "$INPUT_MAX_BATCHES" \
+            $INCLUDE_BJ_FLAG \
+            --output "$GITHUB_WORKSPACE/.work/batches.json"
+
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path(os.environ["GITHUB_WORKSPACE"]) / ".work" / "batches.json"
+          d = json.loads(p.read_text(encoding="utf-8"))
+          print(f"股票数: {d['total_secids']}, 批次数: {d['batch_count']}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"total_secids={d['total_secids']}\n")
+              f.write(f"batch_count={d['batch_count']}\n")
+          PY
+
+      - name: 校验批次非空
+        env:
+          TOTAL_SECIDS: ${{ steps.batches.outputs.total_secids }}
+        run: |
+          if [[ "$TOTAL_SECIDS" == "0" ]]; then
+            echo "::error::股票列表为空"
+            exit 1
+          fi
+
+      - name: 预检-验证访问权限
+        env:
+          TARGET_REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          TARGET_REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if [[ -z "${TARGET_REPO_OWNER:-}" || -z "${TARGET_REPO_TOKEN:-}" ]]; then
+            echo "::error::缺少 TARGET_REPO_OWNER 或 TARGET_REPO_TOKEN secret"
+            exit 1
+          fi
+
+          FIRST_SID=$(python3 - <<'PY'
+          import json, os
+          p = os.path.join(os.environ["GITHUB_WORKSPACE"], ".work", "batches.json")
+          d = json.load(open(p, encoding="utf-8"))
+          print(d["secids"][0])
+          PY
+          )
+          echo "预检: 尝试克隆 ${FIRST_SID}..."
+          PREFLIGHT_DIR="$GITHUB_WORKSPACE/.work/preflight_repo"
+          git clone --depth 1 \
+            "https://x-access-token:${TARGET_REPO_TOKEN}@github.com/${TARGET_REPO_OWNER}/${FIRST_SID}.git" \
+            "$PREFLIGHT_DIR"
+
+          for d in data/raw data/kline; do
+            if [[ ! -d "$PREFLIGHT_DIR/$d" ]]; then
+              echo "::warning::${FIRST_SID} 缺少 $d 目录"
+            fi
+          done
+          if [[ ! -f "$PREFLIGHT_DIR/data/raw/stock_shares.json" ]]; then
+            echo "::warning::${FIRST_SID} 缺少 stock_shares.json"
+          fi
+          DAT_COUNT=$(find "$PREFLIGHT_DIR/data/raw" -name '*.dat' 2>/dev/null | wc -l)
+          echo "预检通过: ${FIRST_SID} 包含 ${DAT_COUNT} 个 .dat 文件"
+          rm -rf "$PREFLIGHT_DIR"
+
+      - name: full 模式清空旧特征数据
+        if: ${{ inputs.mode == 'full' }}
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$GITHUB_WORKSPACE/stock-mining/data/features" \
+                 "$GITHUB_WORKSPACE/stock-mining/data/labels" \
+                 "$GITHUB_WORKSPACE/stock-mining/data/ml"
+          mkdir -p "$GITHUB_WORKSPACE/stock-mining/data/features" \
+                   "$GITHUB_WORKSPACE/stock-mining/data/labels" \
+                   "$GITHUB_WORKSPACE/stock-mining/data/ml"
+
+      - name: 分批提取特征与标签
+        env:
+          TARGET_REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
+          TARGET_REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          DATE_RANGE: ${{ inputs.date_range }}
+          FORCE_DOWNLOAD: ${{ inputs.force_download }}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          STOCK_GRABBER="$ROOT/stock-grabber"
+          STOCK_MINING="$ROOT/stock-mining"
+          REPO_CACHE="$ROOT/.work/repo_cache"
+          mkdir -p "$REPO_CACHE"
+
+          BATCH_COUNT=$(python3 - <<'PY'
+          import json, os
+          p = os.path.join(os.environ["GITHUB_WORKSPACE"], ".work", "batches.json")
+          print(json.load(open(p, encoding="utf-8"))["batch_count"])
+          PY
+          )
+
+          total_ok=0
+          total_fail=0
+
+          for ((idx=0; idx<BATCH_COUNT; idx++)); do
+            batch_no=$((idx+1))
+            BATCH_JSON=$(IDX="$idx" python3 - <<'PY'
+            import json, os
+            p = os.path.join(os.environ["GITHUB_WORKSPACE"], ".work", "batches.json")
+            idx = int(os.environ["IDX"])
+            d = json.load(open(p, encoding="utf-8"))
+            print(json.dumps(d["batches"][idx], ensure_ascii=False))
+            PY
+            )
+
+            echo "::group::Batch ${batch_no}/${BATCH_COUNT}"
+            echo "batch=${BATCH_JSON}"
+
+            # 可选: 下载数据
+            if [[ -n "${DATE_RANGE:-}" ]]; then
+              echo "Batch ${batch_no}: download_data.py DATE=${DATE_RANGE}"
+              (
+                cd "$STOCK_GRABBER"
+                export REPO_OWNER="$TARGET_REPO_OWNER"
+                export REPO_TOKEN="$TARGET_REPO_TOKEN"
+                export SECIDS="$BATCH_JSON"
+                export SHARD_ID="feat-${batch_no}"
+                export DATE="$DATE_RANGE"
+                export DATE_IS_DEFAULT="false"
+                export FORCE="$FORCE_DOWNLOAD"
+                export CHECK_DAT_COMPLETENESS="true"
+                export DAT_LAST_TS_MIN="144500"
+                export DAT_ACTIVE_MIN_SIZE="2000"
+                export AUTO_KLINE_ON_DEFAULT_DATE="true"
+                python3 scripts/download_data.py
+              )
+            else
+              echo "Batch ${batch_no}: 未指定 date_range，跳过下载步骤"
+            fi
+
+            # 同步 repo 缓存
+            BATCH_JSON="$BATCH_JSON" REPO_CACHE="$REPO_CACHE" TARGET_REPO_OWNER="$TARGET_REPO_OWNER" TARGET_REPO_TOKEN="$TARGET_REPO_TOKEN" \
+            python3 - <<'PY'
+            import json, os, subprocess
+            from pathlib import Path
+            batch = json.loads(os.environ["BATCH_JSON"])
+            cache = Path(os.environ["REPO_CACHE"])
+            owner = os.environ["TARGET_REPO_OWNER"]
+            token = os.environ["TARGET_REPO_TOKEN"]
+            cache.mkdir(parents=True, exist_ok=True)
+            for sid in batch:
+                target = cache / sid
+                url = f"https://x-access-token:{token}@github.com/{owner}/{sid}.git"
+                if target.exists():
+                    subprocess.run(["git", "-C", str(target), "fetch", "--depth", "1", "origin"], check=True)
+                    branch = subprocess.check_output(
+                        ["git", "-C", str(target), "rev-parse", "--abbrev-ref", "HEAD"], text=True
+                    ).strip()
+                    subprocess.run(["git", "-C", str(target), "reset", "--hard", f"origin/{branch}"], check=True)
+                else:
+                    subprocess.run(["git", "clone", "--depth", "1", url, str(target)], check=True)
+            PY
+
+            # 特征提取 + 标签生成
+            export BATCH_JSON
+            mapfile -t SECIDS < <(python3 - <<'PY'
+            import json, os
+            for sid in json.loads(os.environ["BATCH_JSON"]):
+                print(sid)
+            PY
+            )
+
+            for sid in "${SECIDS[@]}"; do
+              echo "处理 ${sid}..."
+              repo_dir="$REPO_CACHE/$sid"
+              feat_csv="$STOCK_MINING/data/features/${sid}.csv"
+              label_csv="$STOCK_MINING/data/labels/${sid}.csv"
+
+              if PYTHONPATH="$STOCK_GRABBER/tools:$STOCK_MINING:${PYTHONPATH:-}" \
+                   python3 "$STOCK_MINING/mining/features_daily.py" "$sid" \
+                   --repo "$repo_dir" \
+                   --output "$feat_csv" \
+                   --workers 0; then
+                if PYTHONPATH="$STOCK_MINING:${PYTHONPATH:-}" \
+                     python3 "$STOCK_MINING/mining/labeling.py" "$sid" \
+                     --feature "$feat_csv" \
+                     --output "$label_csv" \
+                     --kline-path "$repo_dir/data/kline" \
+                     --stock-shares-path "$repo_dir/data/raw/stock_shares.json"; then
+                  total_ok=$((total_ok + 1))
+                else
+                  echo "::warning::labeling 失败: ${sid}"
+                  total_fail=$((total_fail + 1))
+                fi
+              else
+                echo "::warning::features_daily 失败: ${sid}"
+                total_fail=$((total_fail + 1))
+              fi
+            done
+
+            echo "::endgroup::"
+          done
+
+          echo "特征提取完成: 成功=${total_ok}, 失败=${total_fail}"
+          if [[ "$total_ok" == "0" ]]; then
+            echo "::error::无任何股票成功提取特征"
+            exit 1
+          fi
+
+      - name: 构建训练数据集
+        env:
+          EXCLUDE_DAYS: ${{ inputs.exclude_days }}
+        run: |
+          set -Eeuo pipefail
+          STOCK_MINING="$GITHUB_WORKSPACE/stock-mining"
+
+          (
+            cd "$STOCK_MINING"
+            PYTHONPATH="$STOCK_MINING:${PYTHONPATH:-}" python3 - <<'PY'
+            from mining.ml.data_prep import prepare_dataset
+            prepare_dataset(
+                feat_dir="data/features",
+                label_dir="data/labels",
+                output_path="data/ml/dataset.parquet",
+                exclude=[],
+            )
+            PY
+          )
+
+          python3 "$GITHUB_WORKSPACE/scripts/trim_dataset_recent_days.py" \
+            --input "$STOCK_MINING/data/ml/dataset.parquet" \
+            --output "$STOCK_MINING/data/ml/dataset_trainable.parquet" \
+            --exclude-days "$EXCLUDE_DAYS"
+
+          echo "数据集构建完成"
+          python3 - <<'PY'
+          import pandas as pd, os
+          p = os.path.join(os.environ["GITHUB_WORKSPACE"], "stock-mining/data/ml/dataset_trainable.parquet")
+          df = pd.read_parquet(p)
+          secids = df["secid"].nunique() if "secid" in df.columns else "N/A"
+          print(f"  样本数: {len(df)}, 列数: {len(df.columns)}, 股票数: {secids}")
+          dates = sorted(df["date"].astype(str).unique()) if "date" in df.columns else []
+          if dates:
+              print(f"  日期范围: {dates[0]} ~ {dates[-1]}, 交易日数: {len(dates)}")
+          PY
+
+      - name: 提交特征与标签到 stock-mining
+        run: |
+          set -Eeuo pipefail
+          cd "$GITHUB_WORKSPACE/stock-mining"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+          git add data/features/ data/labels/ data/ml/
+          if git diff --staged --quiet; then
+            echo "特征数据无变化"
+          else
+            FEAT_COUNT=$(find data/features -name '*.csv' | wc -l)
+            git commit -m "chore: 更新特征数据 (${FEAT_COUNT} stocks, $(date +%F))"
+            git push origin HEAD:main
+          fi
+
+      - name: 上传数据集产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: features-v2-dataset
+          path: |
+            stock-mining/data/ml/dataset_trainable.parquet
+            stock-mining/data/ml/dataset.parquet
+          if-no-files-found: ignore
+          retention-days: 14

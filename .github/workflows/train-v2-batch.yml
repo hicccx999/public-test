@@ -6,42 +6,6 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "训练模式: full=从0开始, incremental=基于现有数据增量"
-        required: true
-        default: "incremental"
-        type: choice
-        options:
-          - full
-          - incremental
-      date_range:
-        description: "增量下载日期范围 (YYYYMMDD 或 YYYYMMDD~YYYYMMDD, 可留空)"
-        required: false
-        type: string
-      repo_secids:
-        description: "训练股票列表(secid/代码, 逗号分隔, 留空=全量)"
-        required: false
-        type: string
-      include_bj:
-        description: "repo_secids 为空时，是否包含北交所"
-        required: false
-        default: false
-        type: boolean
-      batch_size:
-        description: "每批训练股票数"
-        required: false
-        default: "20"
-        type: string
-      max_batches:
-        description: "最多训练批次数(0=全部)"
-        required: false
-        default: "0"
-        type: string
-      force_download:
-        description: "下载阶段是否强制覆盖已完成日期"
-        required: false
-        default: false
-        type: boolean
       gate_trials:
         description: "Gate 模型 Optuna trials"
         required: false
@@ -56,6 +20,11 @@ on:
         description: "Walk-forward folds"
         required: false
         default: "4"
+        type: string
+      exclude_days:
+        description: "数据集排除最近N个交易日"
+        required: false
+        default: "20"
         type: string
       infer_secids:
         description: "训练后自动推理的股票列表(secid/代码, 逗号分隔, 留空=跳过推理)"
@@ -73,7 +42,7 @@ env:
 jobs:
   train:
     runs-on: ubuntu-latest
-    timeout-minutes: 720
+    timeout-minutes: 360
     steps:
       - name: 检出 public-test
         uses: actions/checkout@v4
@@ -82,13 +51,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: 检出 stock-grabber
-        uses: actions/checkout@v4
-        with:
-          repository: hiyishui/stock-grabber
-          token: ${{ secrets.GRABBER_PAT }}
-          path: stock-grabber
 
       - name: 检出 stock-mining
         uses: actions/checkout@v4
@@ -104,280 +66,91 @@ jobs:
           pip install --upgrade pip
           pip install numpy pandas scikit-learn lightgbm xgboost optuna pyarrow zstandard
 
-      - name: 生成训练批次
-        id: batches
-        env:
-          INPUT_INCLUDE_BJ: ${{ inputs.include_bj }}
-          INPUT_REPO_SECIDS: ${{ inputs.repo_secids }}
-          INPUT_BATCH_SIZE: ${{ inputs.batch_size }}
-          INPUT_MAX_BATCHES: ${{ inputs.max_batches }}
+      - name: 校验特征数据存在
         run: |
           set -Eeuo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/.work"
-          INCLUDE_BJ_FLAG=""
-          if [[ "$INPUT_INCLUDE_BJ" == "true" ]]; then
-            INCLUDE_BJ_FLAG="--include-bj"
-          fi
+          FEAT_DIR="$GITHUB_WORKSPACE/stock-mining/data/features"
+          LABEL_DIR="$GITHUB_WORKSPACE/stock-mining/data/labels"
 
-          python3 "$GITHUB_WORKSPACE/scripts/make_secid_batches.py" \
-            --all-stocks-json "$GITHUB_WORKSPACE/stock-grabber/data/all_stocks.json" \
-            --secids "$INPUT_REPO_SECIDS" \
-            --batch-size "$INPUT_BATCH_SIZE" \
-            --max-batches "$INPUT_MAX_BATCHES" \
-            $INCLUDE_BJ_FLAG \
-            --output "$GITHUB_WORKSPACE/.work/train_batches.json"
+          FEAT_COUNT=$(find "$FEAT_DIR" -name '*.csv' 2>/dev/null | wc -l)
+          LABEL_COUNT=$(find "$LABEL_DIR" -name '*.csv' 2>/dev/null | wc -l)
 
-          python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          p = Path(os.environ["GITHUB_WORKSPACE"]) / ".work" / "train_batches.json"
-          d = json.loads(p.read_text(encoding="utf-8"))
-          print(f"训练股票数: {d['total_secids']}, 批次数: {d['batch_count']}")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-              f.write(f"total_secids={d['total_secids']}\n")
-              f.write(f"batch_count={d['batch_count']}\n")
-          PY
-
-      - name: 校验批次非空
-        env:
-          TOTAL_SECIDS: ${{ steps.batches.outputs.total_secids }}
-        run: |
-          if [[ "$TOTAL_SECIDS" == "0" ]]; then
-            echo "训练股票列表为空，退出"
+          if [[ "$FEAT_COUNT" -eq 0 ]]; then
+            echo "::error::stock-mining/data/features 中无 CSV 文件，请先运行 V2特征工程 workflow"
             exit 1
           fi
+          echo "特征文件: ${FEAT_COUNT}, 标签文件: ${LABEL_COUNT}"
 
-      - name: 预检-克隆首只训练股票验证访问权限
+      - name: 构建训练数据集
         env:
-          TARGET_REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
-          TARGET_REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          EXCLUDE_DAYS: ${{ inputs.exclude_days }}
         run: |
           set -Eeuo pipefail
-          if [[ -z "${TARGET_REPO_OWNER:-}" || -z "${TARGET_REPO_TOKEN:-}" ]]; then
-            echo "::error::缺少 TARGET_REPO_OWNER 或 TARGET_REPO_TOKEN secret"
-            exit 1
-          fi
+          STOCK_MINING="$GITHUB_WORKSPACE/stock-mining"
 
-          FIRST_SID=$(python3 - <<'PY'
-          import json, os
-          p = os.path.join(os.environ["GITHUB_WORKSPACE"], ".work", "train_batches.json")
-          d = json.load(open(p, encoding="utf-8"))
-          print(d["secids"][0])
+          (
+            cd "$STOCK_MINING"
+            PYTHONPATH="$STOCK_MINING:${PYTHONPATH:-}" python3 - <<'PY'
+            from mining.ml.data_prep import prepare_dataset
+            prepare_dataset(
+                feat_dir="data/features",
+                label_dir="data/labels",
+                output_path="data/ml/dataset.parquet",
+                exclude=[],
+            )
           PY
           )
-          echo "预检: 尝试克隆 ${FIRST_SID}..."
-          PREFLIGHT_DIR="$GITHUB_WORKSPACE/.work/preflight_repo"
-          git clone --depth 1 \
-            "https://x-access-token:${TARGET_REPO_TOKEN}@github.com/${TARGET_REPO_OWNER}/${FIRST_SID}.git" \
-            "$PREFLIGHT_DIR"
 
-          # 校验关键数据目录存在
-          for d in data/raw data/kline; do
-            if [[ ! -d "$PREFLIGHT_DIR/$d" ]]; then
-              echo "::warning::${FIRST_SID} 缺少 $d 目录，训练可能失败"
-            fi
-          done
-          if [[ ! -f "$PREFLIGHT_DIR/data/raw/stock_shares.json" ]]; then
-            echo "::warning::${FIRST_SID} 缺少 stock_shares.json，labeling 可能失败"
-          fi
+          python3 "$GITHUB_WORKSPACE/scripts/trim_dataset_recent_days.py" \
+            --input "$STOCK_MINING/data/ml/dataset.parquet" \
+            --output "$STOCK_MINING/data/ml/dataset_trainable.parquet" \
+            --exclude-days "$EXCLUDE_DAYS"
 
-          DAT_COUNT=$(find "$PREFLIGHT_DIR/data/raw" -name '*.dat' 2>/dev/null | wc -l)
-          echo "预检通过: ${FIRST_SID} 包含 ${DAT_COUNT} 个 .dat 文件"
-          rm -rf "$PREFLIGHT_DIR"
+          python3 - <<'PY'
+          import pandas as pd, os
+          p = os.path.join(os.environ["GITHUB_WORKSPACE"], "stock-mining/data/ml/dataset_trainable.parquet")
+          df = pd.read_parquet(p)
+          secids = df["secid"].nunique() if "secid" in df.columns else "N/A"
+          print(f"数据集: 样本数={len(df)}, 列数={len(df.columns)}, 股票数={secids}")
+          dates = sorted(df["date"].astype(str).unique()) if "date" in df.columns else []
+          if dates:
+              print(f"日期范围: {dates[0]} ~ {dates[-1]}, 交易日数={len(dates)}")
+          PY
 
-      - name: full 模式清空旧训练数据
-        if: ${{ inputs.mode == 'full' }}
+      - name: 训练 Gate 模型
+        env:
+          GATE_TRIALS: ${{ inputs.gate_trials }}
+          FOLDS: ${{ inputs.folds }}
         run: |
           set -Eeuo pipefail
-          rm -rf "$GITHUB_WORKSPACE/stock-mining/data/features" \
-                 "$GITHUB_WORKSPACE/stock-mining/data/labels" \
-                 "$GITHUB_WORKSPACE/stock-mining/data/ml" \
-                 "$GITHUB_WORKSPACE/stock-mining/data/reports" \
-                 "$GITHUB_WORKSPACE/stock-mining/models/v2"
-          mkdir -p "$GITHUB_WORKSPACE/stock-mining/data/features" \
-                   "$GITHUB_WORKSPACE/stock-mining/data/labels" \
-                   "$GITHUB_WORKSPACE/stock-mining/data/ml" \
-                   "$GITHUB_WORKSPACE/stock-mining/data/reports" \
-                   "$GITHUB_WORKSPACE/stock-mining/models/v2"
+          cd "$GITHUB_WORKSPACE/stock-mining"
+          PYTHONPATH="$GITHUB_WORKSPACE/stock-mining:${PYTHONPATH:-}" \
+            python3 -m mining.ml.train_gate \
+              --dataset "data/ml/dataset_trainable.parquet" \
+              --output-dir "models/v2" \
+              --trials "$GATE_TRIALS" \
+              --folds "$FOLDS"
 
-      - name: 分批下载并训练
+      - name: 训练 Stage 模型
         env:
-          TARGET_REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
-          TARGET_REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
-          DATE_RANGE: ${{ inputs.date_range }}
-          FORCE_DOWNLOAD: ${{ inputs.force_download }}
-          GATE_TRIALS: ${{ inputs.gate_trials }}
           STAGE_TRIALS: ${{ inputs.stage_trials }}
           FOLDS: ${{ inputs.folds }}
         run: |
           set -Eeuo pipefail
+          cd "$GITHUB_WORKSPACE/stock-mining"
+          PYTHONPATH="$GITHUB_WORKSPACE/stock-mining:${PYTHONPATH:-}" \
+            python3 -m mining.ml.train_stage \
+              --dataset "data/ml/dataset_trainable.parquet" \
+              --output-dir "models/v2" \
+              --trials "$STAGE_TRIALS" \
+              --folds "$FOLDS"
 
-          if [[ -z "${TARGET_REPO_OWNER:-}" || -z "${TARGET_REPO_TOKEN:-}" ]]; then
-            echo "缺少 TARGET_REPO_OWNER / TARGET_REPO_TOKEN"
-            exit 1
-          fi
-
-          ROOT="$GITHUB_WORKSPACE"
-          STOCK_GRABBER="$ROOT/stock-grabber"
-          STOCK_MINING="$ROOT/stock-mining"
-          BATCH_FILE="$ROOT/.work/train_batches.json"
-          REPO_CACHE="$ROOT/.work/repo_cache"
-          mkdir -p "$REPO_CACHE"
-
-          BATCH_COUNT=$(python3 - <<'PY'
-          import json, os
-          p = os.path.join(os.environ["GITHUB_WORKSPACE"], ".work", "train_batches.json")
-          print(json.load(open(p, encoding="utf-8"))["batch_count"])
-          PY
-          )
-
-          for ((idx=0; idx<BATCH_COUNT; idx++)); do
-            batch_no=$((idx+1))
-            BATCH_JSON=$(IDX="$idx" python3 - <<'PY'
-            import json, os, sys
-            p = os.path.join(os.environ["GITHUB_WORKSPACE"], ".work", "train_batches.json")
-            idx = int(os.environ["IDX"])
-            d = json.load(open(p, encoding="utf-8"))
-            print(json.dumps(d["batches"][idx], ensure_ascii=False))
-            PY
-            )
-
-            echo "::group::Batch ${batch_no}/${BATCH_COUNT}"
-            echo "batch=${BATCH_JSON}"
-
-            # 可选: 先按日期范围增量下载并推送到股票repo
-            if [[ -n "${DATE_RANGE:-}" ]]; then
-              echo "Batch ${batch_no}: download_data.py DATE=${DATE_RANGE}"
-              (
-                cd "$STOCK_GRABBER"
-                export REPO_OWNER="$TARGET_REPO_OWNER"
-                export REPO_TOKEN="$TARGET_REPO_TOKEN"
-                export SECIDS="$BATCH_JSON"
-                export SHARD_ID="train-${batch_no}"
-                export DATE="$DATE_RANGE"
-                export DATE_IS_DEFAULT="false"
-                export FORCE="$FORCE_DOWNLOAD"
-                export CHECK_DAT_COMPLETENESS="true"
-                export DAT_LAST_TS_MIN="144500"
-                export DAT_ACTIVE_MIN_SIZE="2000"
-                export AUTO_KLINE_ON_DEFAULT_DATE="true"
-                python3 scripts/download_data.py
-              )
-            else
-              echo "Batch ${batch_no}: 未指定 date_range，跳过下载步骤"
-            fi
-
-            # 同步本地训练用 repo 缓存
-            IDX="$idx" BATCH_JSON="$BATCH_JSON" REPO_CACHE="$REPO_CACHE" TARGET_REPO_OWNER="$TARGET_REPO_OWNER" TARGET_REPO_TOKEN="$TARGET_REPO_TOKEN" \
-            python3 - <<'PY'
-            import json
-            import os
-            import subprocess
-            from pathlib import Path
-
-            batch = json.loads(os.environ["BATCH_JSON"])
-            cache = Path(os.environ["REPO_CACHE"])
-            owner = os.environ["TARGET_REPO_OWNER"]
-            token = os.environ["TARGET_REPO_TOKEN"]
-            cache.mkdir(parents=True, exist_ok=True)
-
-            for sid in batch:
-                target = cache / sid
-                url = f"https://x-access-token:{token}@github.com/{owner}/{sid}.git"
-                if target.exists():
-                    subprocess.run(["git", "-C", str(target), "fetch", "--depth", "1", "origin"], check=True)
-                    branch = subprocess.check_output(
-                        ["git", "-C", str(target), "rev-parse", "--abbrev-ref", "HEAD"], text=True
-                    ).strip()
-                    subprocess.run(["git", "-C", str(target), "reset", "--hard", f"origin/{branch}"], check=True)
-                else:
-                    subprocess.run(["git", "clone", "--depth", "1", url, str(target)], check=True)
-            PY
-
-            export BATCH_JSON
-            mapfile -t SECIDS < <(python3 - <<'PY'
-            import json, os
-            for sid in json.loads(os.environ["BATCH_JSON"]):
-                print(sid)
-            PY
-            )
-
-            ok_count=0
-            for sid in "${SECIDS[@]}"; do
-              echo "处理 ${sid}..."
-              repo_dir="$REPO_CACHE/$sid"
-              feat_csv="$STOCK_MINING/data/features/${sid}.csv"
-              label_csv="$STOCK_MINING/data/labels/${sid}.csv"
-
-              if PYTHONPATH="$STOCK_GRABBER/tools:$STOCK_MINING:${PYTHONPATH:-}" \
-                   python3 "$STOCK_MINING/mining/features_daily.py" "$sid" \
-                   --repo "$repo_dir" \
-                   --output "$feat_csv" \
-                   --workers 0; then
-                if PYTHONPATH="$STOCK_MINING:${PYTHONPATH:-}" \
-                     python3 "$STOCK_MINING/mining/labeling.py" "$sid" \
-                     --feature "$feat_csv" \
-                     --output "$label_csv" \
-                     --kline-path "$repo_dir/data/kline" \
-                     --stock-shares-path "$repo_dir/data/raw/stock_shares.json"; then
-                  ok_count=$((ok_count + 1))
-                else
-                  echo "labeling 失败: ${sid}"
-                fi
-              else
-                echo "features_daily 失败: ${sid}"
-              fi
-            done
-
-            if [[ "$ok_count" == "0" ]]; then
-              echo "Batch ${batch_no}: 本批无成功股票，跳过训练"
-              echo "::endgroup::"
-              continue
-            fi
-
-            # 重建 dataset + 自动过滤最近20个交易日 + 训练
-            (
-              cd "$STOCK_MINING"
-              PYTHONPATH="$STOCK_MINING:${PYTHONPATH:-}" python3 - <<'PY'
-              from mining.ml.data_prep import prepare_dataset
-              prepare_dataset(
-                  feat_dir="data/features",
-                  label_dir="data/labels",
-                  output_path="data/ml/dataset.parquet",
-                  exclude=[],
-              )
-              PY
-            )
-
-            python3 "$ROOT/scripts/trim_dataset_recent_days.py" \
-              --input "$STOCK_MINING/data/ml/dataset.parquet" \
-              --output "$STOCK_MINING/data/ml/dataset_trainable.parquet" \
-              --exclude-days 20
-
-            (
-              cd "$STOCK_MINING"
-              PYTHONPATH="$STOCK_MINING:${PYTHONPATH:-}" \
-                python3 -m mining.ml.train_gate \
-                  --dataset "data/ml/dataset_trainable.parquet" \
-                  --output-dir "models/v2" \
-                  --trials "$GATE_TRIALS" \
-                  --folds "$FOLDS"
-
-              PYTHONPATH="$STOCK_MINING:${PYTHONPATH:-}" \
-                python3 -m mining.ml.train_stage \
-                  --dataset "data/ml/dataset_trainable.parquet" \
-                  --output-dir "models/v2" \
-                  --trials "$STAGE_TRIALS" \
-                  --folds "$FOLDS"
-            )
-
-            echo "::endgroup::"
-          done
-
-          test -f "$STOCK_MINING/models/v2/gate_xgb.json"
-          test -f "$STOCK_MINING/models/v2/stage_lgbm.txt"
+      - name: 校验模型产出
+        run: |
+          set -Eeuo pipefail
+          test -f "$GITHUB_WORKSPACE/stock-mining/models/v2/gate_xgb.json"
+          test -f "$GITHUB_WORKSPACE/stock-mining/models/v2/stage_lgbm.txt"
+          echo "模型文件校验通过"
 
       - name: 提交训练模型到 stock-mining/models/v2
         run: |
