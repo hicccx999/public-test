@@ -45,6 +45,7 @@ jobs:
           DATE: ${{ inputs.date }}
           ONLY_CODES: ${{ inputs.codes }}
           FORCE: ${{ inputs.force }}
+          EXCLUDE_BJ_STAR: "true"
         run: python3 scripts/prepare_matrix.py
 
   download:
@@ -64,17 +65,15 @@ jobs:
 
       - name: 下载数据 (分片 ${{ matrix.shard }}, ${{ matrix.count }} 只)
         env:
-          REPO_OWNER: ${{ secrets.TARGET_REPO_OWNER }}
-          REPO_TOKEN: ${{ secrets.TARGET_REPO_TOKEN }}
+          REPO_OWNER: ${{ secrets.LARKSELF_OWNER }}
+          REPO_TOKEN: ${{ secrets.LARKSELF_TOKEN }}
           SECIDS: ${{ matrix.secids }}
           SHARD_ID: ${{ matrix.shard }}
           DATE: ${{ needs.prepare.outputs.date }}
-          DATE_IS_DEFAULT: ${{ inputs.date == '' }}
           FORCE: ${{ inputs.force }}
           CHECK_DAT_COMPLETENESS: "true"
           DAT_LAST_TS_MIN: "144500"
           DAT_ACTIVE_MIN_SIZE: "2000"
-          AUTO_KLINE_ON_DEFAULT_DATE: "true"
         run: python3 scripts/download_data.py
 
       - name: 上传分片结果
