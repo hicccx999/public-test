@@ -30,6 +30,7 @@ jobs:
     outputs:
       should_run: ${{ steps.matrix.outputs.should_run }}
       date: ${{ steps.matrix.outputs.date }}
+      download_shard_mode: ${{ steps.matrix.outputs.download_shard_mode }}
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - name: 检出 stock-grabber
@@ -45,6 +46,9 @@ jobs:
           DATE: ${{ inputs.date }}
           ONLY_CODES: ${{ inputs.codes }}
           FORCE: ${{ inputs.force }}
+          DOWNLOAD_SHARD_MODE: auto
+          DOWNLOAD_DAY_CHUNK_SIZE: "500"
+          DOWNLOAD_MATRIX_MAX_JOBS: "256"
           EXCLUDE_BJ_STAR: "true"
         run: python3 scripts/prepare_matrix.py
 
@@ -57,7 +61,7 @@ jobs:
       cancel-in-progress: false
     strategy:
       fail-fast: false
-      max-parallel: 40
+      max-parallel: 20
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
       - name: 检出 stock-grabber
@@ -69,6 +73,8 @@ jobs:
       - name: 下载数据 (日期 ${{ matrix.date }}, 分片 ${{ matrix.shard }}, ${{ matrix.count }} 只)
         env:
           SECIDS: ${{ matrix.secids }}
+          USE_ALL_SECIDS: ${{ matrix.all_secids }}
+          EXCLUDE_BJ_STAR: "true"
           SHARD_ID: ${{ matrix.shard }}
           DATE: ${{ matrix.date }}
           FORCE: ${{ inputs.force }}
@@ -85,36 +91,3 @@ jobs:
           DATA_DIR: data/dl_output
           PUSH_BATCH_SIZE: "500"
         run: python3 scripts/push_date_repo.py
-
-      - name: 上传分片结果
-        if: always() && !cancelled()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dl-result-${{ matrix.shard }}
-          path: data/dl_results/shard_${{ matrix.shard }}.json
-          retention-days: 3
-          if-no-files-found: ignore
-
-  report:
-    if: always() && !cancelled() && needs.prepare.outputs.should_run == 'true'
-    needs: [prepare, download]
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出 stock-grabber
-        uses: actions/checkout@v4
-        with:
-          repository: hiyishui/stock-grabber
-          token: ${{ secrets.GRABBER_PAT }}
-
-      - name: 下载所有分片结果
-        uses: actions/download-artifact@v4
-        with:
-          pattern: dl-result-*
-          path: data/dl_results
-          merge-multiple: true
-
-      - name: 汇总报告
-        env:
-          INPUT_DATE: ${{ inputs.date }}
-          INPUT_CODES: ${{ inputs.codes }}
-        run: python3 scripts/merge_dl_report.py
