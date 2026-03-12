@@ -43,6 +43,8 @@ jobs:
       - name: 解析日期 & 跳过已存在
         id: resolve
         run: |
+          set -euo pipefail
+
           INPUT="${{ inputs.dates }}"
           [ -z "$INPUT" ] && INPUT=$(TZ=Asia/Shanghai date +%Y%m%d)
 
@@ -79,6 +81,16 @@ jobs:
             fi
           done
           ALL="$TRADING"
+
+          # ── 去重(保持输入顺序), 避免并行重复克隆同一天导致包覆盖 ──
+          DEDUP=""
+          for D in $ALL; do
+            case " $DEDUP " in
+              *" $D "*) ;;
+              *) DEDUP="${DEDUP:+$DEDUP }$D" ;;
+            esac
+          done
+          ALL="$DEDUP"
 
           FORCE="${{ inputs.force }}"
           DATES="$ALL"
@@ -124,6 +136,8 @@ jobs:
         env:
           CLONE_TOKEN: ${{ secrets.LARKSELF_PAT }}
         run: |
+          set -euo pipefail
+
           # ── Git 性能调优 ──
           git config --global protocol.version 2
           git config --global http.postBuffer 524288000
@@ -134,25 +148,44 @@ jobs:
 
           # ── 单日期克隆函数 ──
           clone_one() {
-            local DC="$1" DD WORKDIR N SZ
+            set -euo pipefail
+            local DC="$1" DD WORKDIR ARCHIVE N SZ TRY
             DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
             WORKDIR=".work/date-repo-${DC}"
-            echo "📦 [$DC] 克隆 ${DD} ..."
-            git clone --depth 1 --filter=blob:none --no-tags --sparse \
-              "https://x-access-token:${CLONE_TOKEN}@github.com/larkself/${DD}.git" \
-              "$WORKDIR" 2>&1 | sed "s/^/[$DC] /"
-            (cd "$WORKDIR" && git sparse-checkout set raw/pankou && git checkout) 2>&1 | sed "s/^/[$DC] /"
-            tar czf ".work/archives/${DC}.tar.gz" -C "$WORKDIR" raw/pankou
-            N=$(find "$WORKDIR/raw/pankou" -name '*.dat' | wc -l)
-            SZ=$(du -sh ".work/archives/${DC}.tar.gz" | cut -f1)
-            echo "✅ [$DC] ${N} .dat → ${SZ}"
-            rm -rf "$WORKDIR"
+            ARCHIVE=".work/archives/${DC}.tar.gz"
+
+            for TRY in 1 2 3; do
+              rm -rf "$WORKDIR" "$ARCHIVE"
+              echo "📦 [$DC] 克隆 ${DD} (attempt ${TRY}/3) ..."
+
+              if git clone --depth 1 --filter=blob:none --no-tags --sparse \
+                "https://x-access-token:${CLONE_TOKEN}@github.com/larkself/${DD}.git" \
+                "$WORKDIR" \
+                && (cd "$WORKDIR" && git sparse-checkout set raw/pankou && git checkout) \
+                && tar czf "$ARCHIVE" -C "$WORKDIR" raw/pankou \
+                && gzip -t "$ARCHIVE"; then
+                N=$(find "$WORKDIR/raw/pankou" -name '*.dat' | wc -l | xargs)
+                SZ=$(du -sh "$ARCHIVE" | cut -f1)
+                echo "✅ [$DC] ${N} .dat → ${SZ}"
+                rm -rf "$WORKDIR"
+                return 0
+              fi
+
+              echo "⚠️ [$DC] attempt ${TRY} 失败, 准备重试"
+              sleep $((TRY * 2))
+            done
+
+            echo "❌ [$DC] 连续 3 次失败, 终止" >&2
+            return 1
           }
           export -f clone_one
 
           # ── 最多 4 个并行克隆 ──
-          echo "${{ needs.prepare.outputs.dates }}" | tr ' ' '\n' | \
-            xargs -P 4 -I {} bash -c 'clone_one "$@"' _ {}
+          echo "${{ needs.prepare.outputs.dates }}" | tr ' ' '\n' | sed '/^$/d' | \
+            xargs -r -P 4 -I {} bash -euo pipefail -c 'clone_one "$1"' _ {}
+
+          # ── 生成校验清单, 供 extract 阶段完整性校验 ──
+          (cd .work/archives && sha256sum *.tar.gz > SHA256SUMS)
 
       - name: 上传日期数据包
         uses: actions/upload-artifact@v4
@@ -210,16 +243,30 @@ jobs:
           name: date-archives
           path: .work/archives/
 
+      - name: 校验日期数据包完整性
+        run: |
+          set -euo pipefail
+          test -f .work/archives/SHA256SUMS
+          (cd .work/archives && sha256sum -c SHA256SUMS)
+
       - name: 提取 shard ${{ matrix.shard }}
         run: |
+          set -euo pipefail
           SHARD_TOTAL=${{ inputs.shards || '20' }}
 
           for DC in ${{ needs.prepare.outputs.dates }}; do
             DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
+            ARCHIVE=".work/archives/${DC}.tar.gz"
             echo "🔄 shard${{ matrix.shard }}: $DC ..."
 
             mkdir -p ".work/dates/${DC}"
-            tar xzf ".work/archives/${DC}.tar.gz" -C ".work/dates/${DC}"
+            if [ ! -s "$ARCHIVE" ]; then
+              echo "❌ 缺少或空压缩包: $ARCHIVE" >&2
+              ls -lh .work/archives
+              exit 1
+            fi
+            gzip -t "$ARCHIVE"
+            tar xzf "$ARCHIVE" -C ".work/dates/${DC}"
 
             python3 stock-grabber/hicccx999/extract_base_pankou.py \
               --target-date "$DD" \
