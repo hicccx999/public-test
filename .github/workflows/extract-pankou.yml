@@ -31,6 +31,15 @@ jobs:
       dates: ${{ steps.resolve.outputs.dates }}
       shard_matrix: ${{ steps.matrix.outputs.shards }}
     steps:
+      - name: 获取交易日历
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+          ref: main
+          path: .work/stock-grabber
+          sparse-checkout: data/trade_date.json
+
       - name: 解析日期 & 跳过已存在
         id: resolve
         run: |
@@ -51,6 +60,25 @@ jobs:
               ALL="${ALL:+$ALL }$part"
             fi
           done
+
+          # ── 用交易日历过滤非交易日 ──
+          TRADE_DATES=$(python3 -c "
+          import json
+          with open('.work/stock-grabber/data/trade_date.json') as f:
+              data = json.load(f)
+          # 输出为 YYYYMMDD 格式的集合
+          for d in data['trade_dates']:
+              print(d.replace('-', ''))
+          ")
+          TRADING=""
+          for D in $ALL; do
+            if echo "$TRADE_DATES" | grep -qx "$D"; then
+              TRADING="${TRADING:+$TRADING }$D"
+            else
+              echo "⏭️ $D 非交易日, 跳过"
+            fi
+          done
+          ALL="$TRADING"
 
           FORCE="${{ inputs.force }}"
           DATES="$ALL"
