@@ -12,6 +12,11 @@ on:
         required: false
         type: boolean
         default: false
+      shards:
+        description: "分片数 (并行 job 数, 最大20)"
+        required: false
+        default: "20"
+        type: string
   # schedule:
   #   - cron: "30 8 * * 1-5"  # UTC 8:30 = 北京 16:30
 
@@ -19,44 +24,112 @@ env:
   PYTHON_VERSION: "3.11"
 
 jobs:
-  extract:
+  # ━━ Stage 1: 解析日期 + 过滤跳过 + 生成 matrix ━━
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    outputs:
+      dates: ${{ steps.resolve.outputs.dates }}
+      shard_matrix: ${{ steps.matrix.outputs.shards }}
     steps:
-      - name: Parse dates
-        id: dates
+      - name: 解析日期 & 跳过已存在
+        id: resolve
         run: |
           INPUT="${{ inputs.dates }}"
-          if [ -z "$INPUT" ]; then
-            INPUT=$(TZ=Asia/Shanghai date +%Y%m%d)
-          fi
+          [ -z "$INPUT" ] && INPUT=$(TZ=Asia/Shanghai date +%Y%m%d)
 
-          DATES=""
+          ALL=""
           IFS=',' read -ra PARTS <<< "$INPUT"
           for part in "${PARTS[@]}"; do
             part=$(echo "$part" | xargs)
             if [[ "$part" == *"~"* ]]; then
-              START=$(echo "$part" | cut -d'~' -f1)
-              END=$(echo "$part" | cut -d'~' -f2)
-              CUR="$START"
-              while [[ "$CUR" -le "$END" ]]; do
-                DATES="${DATES:+$DATES }$CUR"
-                CUR=$(date -d "${CUR:0:4}-${CUR:4:2}-${CUR:6:2} + 1 day" +%Y%m%d)
+              S=$(echo "$part" | cut -d'~' -f1); E=$(echo "$part" | cut -d'~' -f2); C="$S"
+              while [[ "$C" -le "$E" ]]; do
+                ALL="${ALL:+$ALL }$C"
+                C=$(date -d "${C:0:4}-${C:4:2}-${C:6:2} + 1 day" +%Y%m%d)
               done
             else
-              DATES="${DATES:+$DATES }$part"
+              ALL="${ALL:+$ALL }$part"
             fi
           done
 
-          echo "all=$DATES" >> "$GITHUB_OUTPUT"
-          echo "📅 待处理日期: $DATES"
+          FORCE="${{ inputs.force }}"
+          DATES="$ALL"
+          if [ "$FORCE" != "true" ]; then
+            git clone --depth 1 \
+              "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
+              .work/gp-features 2>/dev/null || true
+            DATES=""
+            for D in $ALL; do
+              YEAR=${D:0:4}
+              if [ -f ".work/gp-features/base/pankou/${YEAR}/${D}.parquet" ]; then
+                echo "⏭️ $D 已存在, 跳过"
+              else
+                DATES="${DATES:+$DATES }$D"
+              fi
+            done
+          fi
 
-      - name: Checkout public-test
-        uses: actions/checkout@v4
+          echo "dates=$DATES" >> "$GITHUB_OUTPUT"
+          if [ -z "$DATES" ]; then
+            echo "✅ 所有日期已处理"
+          else
+            echo "📅 待处理: $DATES"
+          fi
+
+      - name: 生成分片 matrix
+        id: matrix
+        if: steps.resolve.outputs.dates != ''
+        run: |
+          N=${{ inputs.shards || '20' }}
+          echo "shards=$(python3 -c "import json; print(json.dumps(list(range($N))))")" >> "$GITHUB_OUTPUT"
+          echo "🔀 分片: $N"
+
+  # ━━ Stage 2: 每个日期 clone 一次, 打包为 artifact ━━
+  clone:
+    needs: prepare
+    if: needs.prepare.outputs.dates != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 克隆日期仓库 & 打包
+        run: |
+          mkdir -p .work/archives
+          for DC in ${{ needs.prepare.outputs.dates }}; do
+            DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
+            echo "📦 克隆 $DD ..."
+            rm -rf .work/date-repo
+            git clone --depth 1 --filter=blob:none --sparse \
+              "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/${DD}.git" \
+              .work/date-repo
+            cd .work/date-repo && git sparse-checkout set raw/pankou && git checkout && cd ../..
+
+            tar czf ".work/archives/${DC}.tar.gz" -C .work/date-repo raw/pankou
+            N=$(find .work/date-repo/raw/pankou -name '*.dat' | wc -l)
+            SZ=$(du -sh ".work/archives/${DC}.tar.gz" | cut -f1)
+            echo "✅ $DC: ${N} .dat → ${SZ}"
+          done
+
+      - name: 上传日期数据包
+        uses: actions/upload-artifact@v4
         with:
-          path: public-test
+          name: date-archives
+          path: .work/archives/
+          retention-days: 1
+          compression-level: 0
 
-      - name: Checkout stock-grabber
+  # ━━ Stage 3: 20 个 shard 并行提取特征 ━━
+  extract:
+    needs: [prepare, clone]
+    if: needs.prepare.outputs.dates != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        shard: ${{ fromJson(needs.prepare.outputs.shard_matrix) }}
+      max-parallel: 20
+      fail-fast: false
+    steps:
+      - name: 检出 stock-grabber
         uses: actions/checkout@v4
         with:
           repository: hiyishui/stock-grabber
@@ -66,9 +139,10 @@ jobs:
           sparse-checkout: |
             tools
             data/gb
+            data/all_stocks.json
             hicccx999
 
-      - name: Checkout stock-mining
+      - name: 检出 stock-mining
         uses: actions/checkout@v4
         with:
           repository: hicccx999/stock-mining
@@ -77,74 +151,130 @@ jobs:
           path: stock-mining
           sparse-checkout: mining
 
-      - name: Clone gp-features
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装依赖
+        run: pip install numpy pandas pyarrow zstandard
+
+      - name: 下载日期数据包
+        uses: actions/download-artifact@v4
+        with:
+          name: date-archives
+          path: .work/archives/
+
+      - name: 提取 shard ${{ matrix.shard }}
         run: |
-          git clone --depth 1 \
-            "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
-            .work/gp-features
+          SHARD_TOTAL=${{ inputs.shards || '20' }}
+
+          for DC in ${{ needs.prepare.outputs.dates }}; do
+            DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
+            echo "🔄 shard${{ matrix.shard }}: $DC ..."
+
+            mkdir -p ".work/dates/${DC}"
+            tar xzf ".work/archives/${DC}.tar.gz" -C ".work/dates/${DC}"
+
+            python3 stock-grabber/hicccx999/extract_base_pankou.py \
+              --target-date "$DD" \
+              --dat-dir ".work/dates/${DC}" \
+              --output-dir .work/output \
+              --grabber-dir stock-grabber \
+              --mining-dir stock-mining \
+              --all-stocks-json stock-grabber/data/all_stocks.json \
+              --shard-index ${{ matrix.shard }} \
+              --shard-total "$SHARD_TOTAL"
+
+            rm -rf ".work/dates/${DC}"
+            echo "✅ shard${{ matrix.shard }}: $DC 完成"
+          done
+
+      - name: 上传分片结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: pankou-shard-${{ matrix.shard }}
+          path: .work/output/
+          if-no-files-found: ignore
+          retention-days: 1
+
+  # ━━ Stage 4: 合并分片 + 推送到 gp-features ━━
+  merge:
+    needs: [prepare, extract]
+    if: needs.prepare.outputs.dates != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 下载所有分片
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pankou-shard-*
+          path: .work/shards/
+          merge-multiple: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install dependencies
-        run: pip install numpy pandas pyarrow zstandard
+      - name: 安装依赖
+        run: pip install pandas pyarrow
 
-      - name: Extract for each date
-        id: extract
+      - name: 按天合并分片
+        id: merge
         run: |
-          FORCE="${{ inputs.force }}"
-          PROCESSED=0
-          SKIPPED=0
+          python3 - <<'PY'
+          import sys
+          from collections import defaultdict
+          from pathlib import Path
+          import pandas as pd
 
-          for DATE_COMPACT in ${{ steps.dates.outputs.all }}; do
-            DATE_DASH="${DATE_COMPACT:0:4}-${DATE_COMPACT:4:2}-${DATE_COMPACT:6:2}"
+          shard_dir = Path(".work/shards")
+          out_dir = Path(".work/merged")
+          out_dir.mkdir(parents=True, exist_ok=True)
 
-            # Check if already extracted
-            if [ "$FORCE" != "true" ] && [ -f ".work/gp-features/base/pankou/${DATE_COMPACT}.parquet" ]; then
-              echo "⏭️ 跳过 $DATE_COMPACT (已存在)"
-              SKIPPED=$((SKIPPED + 1))
-              continue
-            fi
+          files = sorted(shard_dir.glob("*_shard*.parquet"))
+          if not files:
+              print("⚠️  无分片产物")
+              sys.exit(0)
 
-            echo "🔄 处理 $DATE_COMPACT ..."
+          by_date = defaultdict(list)
+          for f in files:
+              by_date[f.stem.split("_shard")[0]].append(f)
 
-            # Clone larkself date repo
-            rm -rf .work/date-repo
-            git clone --depth 1 --filter=blob:none --sparse \
-              "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/${DATE_DASH}.git" \
-              ".work/date-repo"
-            cd .work/date-repo
-            git sparse-checkout set raw/pankou
-            git checkout
-            cd ../..
+          for dc, parts in sorted(by_date.items()):
+              year = dc[:4]
+              df = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
+              df.sort_values("secid", inplace=True)
+              df.drop_duplicates(subset=["secid"], keep="first", inplace=True)
+              year_dir = out_dir / year
+              year_dir.mkdir(parents=True, exist_ok=True)
+              out = year_dir / f"{dc}.parquet"
+              df.to_parquet(out, compression="zstd", index=False)
+              print(f"✅ {dc}: {len(df)} stocks ({len(parts)} shards, {out.stat().st_size/1024:.0f}KB)")
 
-            # Extract
-            python3 stock-grabber/hicccx999/extract_base_pankou.py \
-              --target-date "$DATE_DASH" \
-              --dat-dir .work/date-repo \
-              --output-dir .work/base/pankou \
-              --grabber-dir stock-grabber \
-              --mining-dir stock-mining
+          print(f"📊 合并: {len(by_date)} 天")
+          PY
 
-            # Copy to gp-features
-            mkdir -p .work/gp-features/base/pankou
-            cp .work/base/pankou/${DATE_COMPACT}.parquet .work/gp-features/base/pankou/
+          if ls .work/merged/*/*.parquet >/dev/null 2>&1; then
+            echo "has_merged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_merged=false" >> "$GITHUB_OUTPUT"
+          fi
 
-            PROCESSED=$((PROCESSED + 1))
-            echo "✅ $DATE_COMPACT 完成"
-          done
-
-          echo "📊 处理: $PROCESSED, 跳过: $SKIPPED"
-          echo "processed=$PROCESSED" >> "$GITHUB_OUTPUT"
-
-      - name: Push to gp-features
-        if: steps.extract.outputs.processed != '0'
+      - name: 推送到 gp-features
+        if: steps.merge.outputs.has_merged == 'true'
         run: |
+          git clone --depth 1 \
+            "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
+            .work/gp-features
+
+          mkdir -p .work/gp-features/base/pankou
+          cp -r .work/merged/*/ .work/gp-features/base/pankou/
+
           cd .work/gp-features
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add base/pankou/
-          git diff --cached --quiet || git commit -m "base/pankou: ${{ steps.dates.outputs.all }}"
+          git diff --cached --quiet || git commit -m "base/pankou: ${{ needs.prepare.outputs.dates }}"
           git push
