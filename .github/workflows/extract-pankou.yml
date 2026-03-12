@@ -13,7 +13,7 @@ on:
         type: boolean
         default: false
       shards:
-        description: "每个日期的股票分片数 (子 workflow 并行 job 数, 推荐 20)"
+        description: "每个日期的股票分片数 (1~20, 子 workflow 并行 job 数, 推荐 20)"
         required: false
         default: "20"
         type: string
