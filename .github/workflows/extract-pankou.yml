@@ -41,6 +41,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          normalize_date() {
+            local raw="$1"
+            local compact
+            compact=$(echo "$raw" | tr -cd '0-9')
+            if [ "${#compact}" -ne 8 ]; then
+              return 1
+            fi
+            date -d "${compact:0:4}-${compact:4:2}-${compact:6:2}" +%Y%m%d 2>/dev/null || return 1
+          }
+
           INPUT="${{ inputs.dates }}"
           [ -z "$INPUT" ] && INPUT=$(TZ=Asia/Shanghai date +%Y%m%d)
 
@@ -49,15 +59,22 @@ jobs:
           for part in "${PARTS[@]}"; do
             part=$(echo "$part" | xargs)
             if [[ "$part" == *"~"* ]]; then
-              S=$(echo "$part" | cut -d'~' -f1)
-              E=$(echo "$part" | cut -d'~' -f2)
+              S_RAW=$(echo "$part" | cut -d'~' -f1)
+              E_RAW=$(echo "$part" | cut -d'~' -f2)
+              S=$(normalize_date "$S_RAW") || { echo "❌ 无效日期: $S_RAW" >&2; exit 1; }
+              E=$(normalize_date "$E_RAW") || { echo "❌ 无效日期: $E_RAW" >&2; exit 1; }
+              if [[ "$S" -gt "$E" ]]; then
+                echo "❌ 日期范围起始晚于结束: $part" >&2
+                exit 1
+              fi
               C="$S"
               while [[ "$C" -le "$E" ]]; do
                 ALL="${ALL:+$ALL }$C"
                 C=$(date -d "${C:0:4}-${C:4:2}-${C:6:2} + 1 day" +%Y%m%d)
               done
             else
-              ALL="${ALL:+$ALL }$part"
+              D=$(normalize_date "$part") || { echo "❌ 无效日期: $part" >&2; exit 1; }
+              ALL="${ALL:+$ALL }$D"
             fi
           done
 
