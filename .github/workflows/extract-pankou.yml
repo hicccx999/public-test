@@ -1,0 +1,99 @@
+name: Extract Base Pankou
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "目标日期 YYYY-MM-DD (留空=当天)"
+        required: false
+        type: string
+  # schedule:
+  #   - cron: "30 8 * * 1-5"  # UTC 8:30 = 北京 16:30
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Determine target date
+        id: date
+        run: |
+          if [ -n "${{ inputs.target_date }}" ]; then
+            echo "target=${{ inputs.target_date }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "target=$(TZ=Asia/Shanghai date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          fi
+          DATE="${{ inputs.target_date || '' }}"
+          [ -z "$DATE" ] && DATE=$(TZ=Asia/Shanghai date +%Y-%m-%d)
+          echo "compact=$(echo $DATE | tr -d '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout public-test
+        uses: actions/checkout@v4
+        with:
+          path: public-test
+
+      - name: Checkout stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+          path: stock-grabber
+          sparse-checkout: |
+            tools
+            data/gb
+            hicccx999
+
+      - name: Checkout stock-mining
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/stock-mining
+          token: ${{ secrets.GRABBER_PAT }}
+          path: stock-mining
+          sparse-checkout: mining
+
+      - name: Clone larkself date repo
+        run: |
+          DATE="${{ steps.date.outputs.target }}"
+          git clone --depth 1 --filter=blob:none --sparse \
+            "https://x-access-token:${{ secrets.LARKSELF_TOKEN }}@github.com/larkself/${DATE}.git" \
+            ".work/date-repo"
+          cd .work/date-repo
+          git sparse-checkout set raw/pankou
+          git checkout
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install numpy pandas pyarrow zstandard
+
+      - name: Extract base pankou features
+        run: |
+          python3 stock-grabber/hicccx999/extract_base_pankou.py \
+            --target-date "${{ steps.date.outputs.target }}" \
+            --dat-dir .work/date-repo \
+            --output-dir .work/base/pankou \
+            --grabber-dir stock-grabber \
+            --mining-dir stock-mining
+
+      - name: Push to gp-features
+        run: |
+          DATE_COMPACT="${{ steps.date.outputs.compact }}"
+          git clone --depth 1 \
+            "https://x-access-token:${{ secrets.LARKSELF_TOKEN }}@github.com/larkself/gp-features.git" \
+            .work/gp-features
+
+          mkdir -p .work/gp-features/base/pankou
+          cp .work/base/pankou/${DATE_COMPACT}.parquet .work/gp-features/base/pankou/
+
+          cd .work/gp-features
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add base/pankou/${DATE_COMPACT}.parquet
+          git diff --cached --quiet || git commit -m "base/pankou: ${DATE_COMPACT}"
+          git push

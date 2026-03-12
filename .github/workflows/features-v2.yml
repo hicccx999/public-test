@@ -138,7 +138,7 @@ jobs:
             INCLUDE_BJ_FLAG="--include-bj"
           fi
 
-          python3 "$GITHUB_WORKSPACE/scripts/make_secid_batches.py" \
+          python3 "$GITHUB_WORKSPACE/stock-grabber/hicccx999/make_secid_batches.py" \
             --all-stocks-json "$GITHUB_WORKSPACE/stock-grabber/data/all_stocks.json" \
             --secids "$INPUT_REPO_SECIDS" \
             --batch-size "$INPUT_BATCH_SIZE" \
@@ -362,7 +362,7 @@ jobs:
             PY
           )
 
-          python3 "$GITHUB_WORKSPACE/scripts/trim_dataset_recent_days.py" \
+          python3 "$GITHUB_WORKSPACE/stock-grabber/hicccx999/trim_dataset_recent_days.py" \
             --input "$STOCK_MINING/data/ml/dataset.parquet" \
             --output "$STOCK_MINING/data/ml/dataset_trainable.parquet" \
             --exclude-days "$EXCLUDE_DAYS"

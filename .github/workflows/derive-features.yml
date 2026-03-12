@@ -1,0 +1,79 @@
+name: Derive Features
+
+on:
+  workflow_run:
+    workflows: ["Extract Base Pankou"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "目标日期 YYYY-MM-DD (留空=当天)"
+        required: false
+        type: string
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  derive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # 只在上游成功时触发 (workflow_run) 或手动触发
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Determine target date
+        id: date
+        run: |
+          DATE="${{ inputs.target_date || '' }}"
+          [ -z "$DATE" ] && DATE=$(TZ=Asia/Shanghai date +%Y-%m-%d)
+          echo "target=$DATE" >> "$GITHUB_OUTPUT"
+          echo "compact=$(echo $DATE | tr -d '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout public-test
+        uses: actions/checkout@v4
+        with:
+          path: public-test
+
+      - name: Checkout stock-grabber (trade_date.json)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+          path: stock-grabber
+          sparse-checkout: |
+            data/trade_date.json
+            hicccx999
+
+      - name: Clone gp-features (含历史 base parquets)
+        run: |
+          git clone \
+            "https://x-access-token:${{ secrets.LARKSELF_TOKEN }}@github.com/larkself/gp-features.git" \
+            .work/gp-features
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install numpy pandas pyarrow
+
+      - name: Derive features
+        run: |
+          python3 stock-grabber/hicccx999/derive_features.py \
+            --target-date "${{ steps.date.outputs.target }}" \
+            --base-dir .work/gp-features/base \
+            --output-dir .work/gp-features/derived \
+            --trade-date-json stock-grabber/data/trade_date.json
+
+      - name: Push derived features
+        run: |
+          DATE_COMPACT="${{ steps.date.outputs.compact }}"
+          cd .work/gp-features
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add derived/
+          git diff --cached --quiet || git commit -m "derived: ${DATE_COMPACT}"
+          git push

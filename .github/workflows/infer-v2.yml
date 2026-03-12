@@ -96,7 +96,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p "$GITHUB_WORKSPACE/.work"
-          python3 "$GITHUB_WORKSPACE/scripts/make_secid_batches.py" \
+          python3 "$GITHUB_WORKSPACE/stock-grabber/hicccx999/make_secid_batches.py" \
             --all-stocks-json "$GITHUB_WORKSPACE/stock-grabber/data/all_stocks.json" \
             --secids "$INPUT_INFER_SECIDS" \
             --batch-size 100000 \

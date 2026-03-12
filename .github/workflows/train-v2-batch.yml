@@ -52,6 +52,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+          path: stock-grabber
+          sparse-checkout: hicccx999
+
       - name: 检出 stock-mining
         uses: actions/checkout@v4
         with:
@@ -101,7 +109,7 @@ jobs:
           PY
           )
 
-          python3 "$GITHUB_WORKSPACE/scripts/trim_dataset_recent_days.py" \
+          python3 "$GITHUB_WORKSPACE/stock-grabber/hicccx999/trim_dataset_recent_days.py" \
             --input "$STOCK_MINING/data/ml/dataset.parquet" \
             --output "$STOCK_MINING/data/ml/dataset_trainable.parquet" \
             --exclude-days "$EXCLUDE_DAYS"
