@@ -64,8 +64,9 @@ jobs:
       - name: Checkout stock-grabber (trade_date.json)
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/stock-grabber
+          repository: hiyishui/stock-grabber
           token: ${{ secrets.GRABBER_PAT }}
+          ref: main
           path: stock-grabber
           sparse-checkout: |
             data/trade_date.json

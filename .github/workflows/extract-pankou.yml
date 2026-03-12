@@ -59,8 +59,9 @@ jobs:
       - name: Checkout stock-grabber
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/stock-grabber
+          repository: hiyishui/stock-grabber
           token: ${{ secrets.GRABBER_PAT }}
+          ref: main
           path: stock-grabber
           sparse-checkout: |
             tools
@@ -70,8 +71,9 @@ jobs:
       - name: Checkout stock-mining
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.repository_owner }}/stock-mining
+          repository: hiyishui/stock-mining
           token: ${{ secrets.GRABBER_PAT }}
+          ref: main
           path: stock-mining
           sparse-checkout: mining
 
