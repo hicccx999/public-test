@@ -72,6 +72,8 @@ jobs:
 
       - name: 下载数据 (日期 ${{ matrix.date }}, 分片 ${{ matrix.shard }}, ${{ matrix.count }} 只)
         env:
+          REPO_OWNER: larkself
+          REPO_TOKEN: ${{ secrets.LARKSELF_PAT }}
           SECIDS: ${{ matrix.secids }}
           USE_ALL_SECIDS: ${{ matrix.all_secids }}
           EXCLUDE_BJ_STAR: "true"
