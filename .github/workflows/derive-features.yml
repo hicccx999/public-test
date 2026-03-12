@@ -6,10 +6,15 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
-      target_date:
-        description: "目标日期 YYYY-MM-DD (留空=当天)"
+      dates:
+        description: "日期: YYYYMMDD 或 YYYYMMDD~YYYYMMDD, 多个逗号分隔, 留空=当天"
         required: false
         type: string
+      force:
+        description: "强制提取 (已存在也重新提取)"
+        required: false
+        type: boolean
+        default: false
 
 env:
   PYTHON_VERSION: "3.11"
@@ -23,13 +28,33 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
     steps:
-      - name: Determine target date
-        id: date
+      - name: Parse dates
+        id: dates
         run: |
-          DATE="${{ inputs.target_date || '' }}"
-          [ -z "$DATE" ] && DATE=$(TZ=Asia/Shanghai date +%Y-%m-%d)
-          echo "target=$DATE" >> "$GITHUB_OUTPUT"
-          echo "compact=$(echo $DATE | tr -d '-')" >> "$GITHUB_OUTPUT"
+          INPUT="${{ inputs.dates }}"
+          if [ -z "$INPUT" ]; then
+            INPUT=$(TZ=Asia/Shanghai date +%Y%m%d)
+          fi
+
+          DATES=""
+          IFS=',' read -ra PARTS <<< "$INPUT"
+          for part in "${PARTS[@]}"; do
+            part=$(echo "$part" | xargs)
+            if [[ "$part" == *"~"* ]]; then
+              START=$(echo "$part" | cut -d'~' -f1)
+              END=$(echo "$part" | cut -d'~' -f2)
+              CUR="$START"
+              while [[ "$CUR" -le "$END" ]]; do
+                DATES="${DATES:+$DATES }$CUR"
+                CUR=$(date -d "${CUR:0:4}-${CUR:4:2}-${CUR:6:2} + 1 day" +%Y%m%d)
+              done
+            else
+              DATES="${DATES:+$DATES }$part"
+            fi
+          done
+
+          echo "all=$DATES" >> "$GITHUB_OUTPUT"
+          echo "📅 待处理日期: $DATES"
 
       - name: Checkout public-test
         uses: actions/checkout@v4
@@ -60,20 +85,44 @@ jobs:
       - name: Install dependencies
         run: pip install numpy pandas pyarrow
 
-      - name: Derive features
+      - name: Derive features for each date
+        id: derive
         run: |
-          python3 stock-grabber/hicccx999/derive_features.py \
-            --target-date "${{ steps.date.outputs.target }}" \
-            --base-dir .work/gp-features/base \
-            --output-dir .work/gp-features/derived \
-            --trade-date-json stock-grabber/data/trade_date.json
+          FORCE="${{ inputs.force }}"
+          PROCESSED=0
+          SKIPPED=0
+
+          for DATE_COMPACT in ${{ steps.dates.outputs.all }}; do
+            DATE_DASH="${DATE_COMPACT:0:4}-${DATE_COMPACT:4:2}-${DATE_COMPACT:6:2}"
+
+            # Check if already derived
+            if [ "$FORCE" != "true" ] && ls .work/gp-features/derived/*/${DATE_COMPACT}.parquet >/dev/null 2>&1; then
+              echo "⏭️ 跳过 $DATE_COMPACT (已存在)"
+              SKIPPED=$((SKIPPED + 1))
+              continue
+            fi
+
+            echo "🔄 处理 $DATE_COMPACT ..."
+
+            python3 stock-grabber/hicccx999/derive_features.py \
+              --target-date "$DATE_DASH" \
+              --base-dir .work/gp-features/base \
+              --output-dir .work/gp-features/derived \
+              --trade-date-json stock-grabber/data/trade_date.json
+
+            PROCESSED=$((PROCESSED + 1))
+            echo "✅ $DATE_COMPACT 完成"
+          done
+
+          echo "📊 处理: $PROCESSED, 跳过: $SKIPPED"
+          echo "processed=$PROCESSED" >> "$GITHUB_OUTPUT"
 
       - name: Push derived features
+        if: steps.derive.outputs.processed != '0'
         run: |
-          DATE_COMPACT="${{ steps.date.outputs.compact }}"
           cd .work/gp-features
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add derived/
-          git diff --cached --quiet || git commit -m "derived: ${DATE_COMPACT}"
+          git diff --cached --quiet || git commit -m "derived: ${{ steps.dates.outputs.all }}"
           git push
