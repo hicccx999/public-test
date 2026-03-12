@@ -50,14 +50,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: 检出 stock-grabber (all_stocks)
-        uses: actions/checkout@v4
+      - name: 下载共享源码依赖
+        uses: actions/download-artifact@v4
         with:
-          repository: hiyishui/stock-grabber
-          token: ${{ secrets.GRABBER_PAT }}
-          ref: main
-          path: stock-grabber
-          sparse-checkout: data/all_stocks.json
+          name: shared-source-bundle
+          path: .work/sources/
+
+      - name: 解压 stock-grabber
+        run: |
+          set -euo pipefail
+          mkdir -p stock-grabber
+          tar xzf .work/sources/stock-grabber.tar.gz -C stock-grabber
 
       - name: 克隆日期仓库并按 shard 打包
         env:
@@ -380,27 +383,18 @@ jobs:
       matrix:
         shard: ${{ fromJson(needs.prepare-shards.outputs.matrix) }}
     steps:
-      - name: 检出 stock-grabber
-        uses: actions/checkout@v4
+      - name: 下载共享源码依赖
+        uses: actions/download-artifact@v4
         with:
-          repository: hiyishui/stock-grabber
-          token: ${{ secrets.GRABBER_PAT }}
-          ref: main
-          path: stock-grabber
-          sparse-checkout: |
-            tools
-            data/gb
-            data/all_stocks.json
-            hicccx999
+          name: shared-source-bundle
+          path: .work/sources/
 
-      - name: 检出 stock-mining
-        uses: actions/checkout@v4
-        with:
-          repository: hicccx999/stock-mining
-          token: ${{ secrets.HICCC_PAT }}
-          ref: main
-          path: stock-mining
-          sparse-checkout: mining
+      - name: 解压源码依赖
+        run: |
+          set -euo pipefail
+          mkdir -p stock-grabber stock-mining
+          tar xzf .work/sources/stock-grabber.tar.gz -C stock-grabber
+          tar xzf .work/sources/stock-mining.tar.gz -C stock-mining
 
       - name: Setup Python
         uses: actions/setup-python@v5

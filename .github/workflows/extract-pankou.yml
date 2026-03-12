@@ -27,14 +27,54 @@ jobs:
       dates: ${{ steps.resolve.outputs.dates }}
       date_matrix: ${{ steps.matrix.outputs.dates }}
     steps:
-      - name: 获取交易日历
+      - name: 检出 stock-grabber 依赖
         uses: actions/checkout@v4
         with:
           repository: hiyishui/stock-grabber
           token: ${{ secrets.GRABBER_PAT }}
           ref: main
+          fetch-depth: 1
+          filter: blob:none
           path: .work/stock-grabber
-          sparse-checkout: data/trade_date.json
+          sparse-checkout: |
+            data/trade_date.json
+            tools/dat_to_dataframe.py
+            tools/stock_shares_parquet.py
+            data/gb/guben.parquet
+            data/all_stocks.json
+            hicccx999/extract_base_pankou.py
+          sparse-checkout-cone-mode: false
+
+      - name: 检出 stock-mining 依赖
+        uses: actions/checkout@v4
+        with:
+          repository: hicccx999/stock-mining
+          token: ${{ secrets.HICCC_PAT }}
+          ref: main
+          fetch-depth: 1
+          filter: blob:none
+          path: .work/stock-mining
+          sparse-checkout: |
+            mining/dat_loader.py
+            mining/features_daily.py
+          sparse-checkout-cone-mode: false
+
+      - name: 打包共享源码依赖
+        run: |
+          set -euo pipefail
+          mkdir -p .work/sources
+          tar czf .work/sources/stock-grabber.tar.gz -C .work/stock-grabber \
+            tools data/gb data/all_stocks.json hicccx999
+          tar czf .work/sources/stock-mining.tar.gz -C .work/stock-mining \
+            mining
+
+      - name: 上传共享源码依赖
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-source-bundle
+          path: .work/sources/
+          retention-days: 1
+          compression-level: 0
 
       - name: 解析日期 & 跳过已存在
         id: resolve
