@@ -75,7 +75,7 @@ jobs:
       - name: Clone gp-features (含历史 base parquets)
         run: |
           git clone \
-            "https://x-access-token:${{ secrets.LARKSELF_TOKEN }}@github.com/larkself/gp-features.git" \
+            "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
             .work/gp-features
 
       - name: Setup Python

@@ -77,34 +77,10 @@ jobs:
           path: stock-mining
           sparse-checkout: mining
 
-      - name: 诊断 LARKSELF_TOKEN
-        run: |
-          echo "--- 1. Token 是否为空 ---"
-          if [ -z "${{ secrets.LARKSELF_TOKEN }}" ]; then
-            echo "::error::LARKSELF_TOKEN 为空！请在 Settings → Secrets 中配置"
-            exit 1
-          fi
-          echo "Token 已设置 (长度: $(echo -n '${{ secrets.LARKSELF_TOKEN }}' | wc -c))"
-
-          echo "--- 2. Token 身份验证 ---"
-          curl -sf -H "Authorization: token ${{ secrets.LARKSELF_TOKEN }}" \
-            https://api.github.com/user | jq '{login, id}' || echo "::error::Token 无法通过 GitHub API 认证"
-
-          echo "--- 3. 访问 larkself/gp-features ---"
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: token ${{ secrets.LARKSELF_TOKEN }}" \
-            https://api.github.com/repos/larkself/gp-features)
-          echo "HTTP 状态码: $HTTP_CODE"
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "::error::无法访问 larkself/gp-features (HTTP $HTTP_CODE)"
-            curl -s -H "Authorization: token ${{ secrets.LARKSELF_TOKEN }}" \
-              https://api.github.com/repos/larkself/gp-features | jq '{message, documentation_url}'
-          fi
-
       - name: Clone gp-features
         run: |
           git clone --depth 1 \
-            "https://x-access-token:${{ secrets.LARKSELF_TOKEN }}@github.com/larkself/gp-features.git" \
+            "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
             .work/gp-features
 
       - name: Setup Python
@@ -137,7 +113,7 @@ jobs:
             # Clone larkself date repo
             rm -rf .work/date-repo
             git clone --depth 1 --filter=blob:none --sparse \
-              "https://x-access-token:${{ secrets.LARKSELF_TOKEN }}@github.com/larkself/${DATE_DASH}.git" \
+              "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/${DATE_DASH}.git" \
               ".work/date-repo"
             cd .work/date-repo
             git sparse-checkout set raw/pankou
