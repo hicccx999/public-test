@@ -113,7 +113,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: hicccx999/stock-mining
-          token: ${{ secrets.GRABBER_PAT }}
+          token: ${{ secrets.HICCC_PAT }}
           path: stock-mining
           ref: main
           fetch-depth: 0
