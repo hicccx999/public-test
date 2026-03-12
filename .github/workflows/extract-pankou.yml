@@ -71,7 +71,7 @@ jobs:
       - name: Checkout stock-mining
         uses: actions/checkout@v4
         with:
-          repository: hiyishui/stock-mining
+          repository: hicccx999/stock-mining
           token: ${{ secrets.GRABBER_PAT }}
           ref: main
           path: stock-mining
