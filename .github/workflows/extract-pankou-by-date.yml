@@ -1,0 +1,300 @@
+name: Extract Base Pankou (By Date)
+
+on:
+  workflow_call:
+    inputs:
+      date:
+        description: "日期: YYYYMMDD"
+        required: true
+        type: string
+      shards:
+        description: "股票分片数"
+        required: false
+        default: 20
+        type: number
+    secrets:
+      GRABBER_PAT:
+        required: true
+      HICCC_PAT:
+        required: true
+      LARKSELF_PAT:
+        required: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  prepare-shards:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.shards.outputs.matrix }}
+    steps:
+      - name: 生成分片 matrix
+        id: shards
+        run: |
+          set -euo pipefail
+          N=${{ inputs.shards }}
+          if [ "$N" -lt 1 ] || [ "$N" -gt 64 ]; then
+            echo "❌ shards 必须在 1~64 之间, 当前: $N" >&2
+            exit 1
+          fi
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          n = int("${{ inputs.shards }}")
+          print(f"matrix={json.dumps(list(range(n)))}")
+          PY
+
+  clone-date-repo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 克隆日期仓库并打包
+        env:
+          TARGET_DATE: ${{ inputs.date }}
+          CLONE_TOKEN: ${{ secrets.LARKSELF_PAT }}
+        run: |
+          set -euo pipefail
+
+          git config --global protocol.version 2
+          git config --global http.postBuffer 524288000
+          git config --global core.compression 0
+          git config --global pack.threads 0
+
+          DC="$TARGET_DATE"
+          DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
+          WORKDIR=".work/date-repo-${DC}"
+          ARCHIVE=".work/archives/${DC}.tar.gz"
+
+          mkdir -p .work/archives
+
+          for TRY in 1 2 3; do
+            rm -rf "$WORKDIR" "$ARCHIVE"
+            echo "📦 [$DC] 克隆 ${DD} (attempt ${TRY}/3) ..."
+
+            if git clone --depth 1 --filter=blob:none --no-tags --sparse \
+              "https://x-access-token:${CLONE_TOKEN}@github.com/larkself/${DD}.git" \
+              "$WORKDIR" \
+              && (cd "$WORKDIR" && git sparse-checkout set raw/pankou && git checkout) \
+              && tar czf "$ARCHIVE" -C "$WORKDIR" raw/pankou \
+              && gzip -t "$ARCHIVE"; then
+              N=$(find "$WORKDIR/raw/pankou" -name '*.dat' | wc -l | xargs)
+              SZ=$(du -sh "$ARCHIVE" | cut -f1)
+              echo "✅ [$DC] ${N} .dat → ${SZ}"
+              rm -rf "$WORKDIR"
+              sha256sum "$ARCHIVE" > .work/archives/SHA256SUMS
+              exit 0
+            fi
+
+            echo "⚠️ [$DC] attempt ${TRY} 失败, 准备重试"
+            sleep $((TRY * 2))
+          done
+
+          echo "❌ [$DC] 连续 3 次失败, 终止" >&2
+          exit 1
+
+      - name: 上传日期数据包
+        uses: actions/upload-artifact@v4
+        with:
+          name: date-archive-${{ inputs.date }}
+          path: |
+            .work/archives/${{ inputs.date }}.tar.gz
+            .work/archives/SHA256SUMS
+          retention-days: 1
+          compression-level: 0
+
+  extract-shards:
+    needs: [prepare-shards, clone-date-repo]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.shards }}
+      matrix:
+        shard: ${{ fromJson(needs.prepare-shards.outputs.matrix) }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+          ref: main
+          path: stock-grabber
+          sparse-checkout: |
+            tools
+            data/gb
+            data/all_stocks.json
+            hicccx999
+
+      - name: 检出 stock-mining
+        uses: actions/checkout@v4
+        with:
+          repository: hicccx999/stock-mining
+          token: ${{ secrets.HICCC_PAT }}
+          ref: main
+          path: stock-mining
+          sparse-checkout: mining
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装依赖
+        run: pip install numpy pandas pyarrow zstandard
+
+      - name: 下载日期数据包
+        uses: actions/download-artifact@v4
+        with:
+          name: date-archive-${{ inputs.date }}
+          path: .work/archives/
+
+      - name: 校验日期数据包完整性
+        run: |
+          set -euo pipefail
+          test -f .work/archives/SHA256SUMS
+          (cd .work/archives && sha256sum -c SHA256SUMS)
+
+      - name: 提取 shard ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          DC="${{ inputs.date }}"
+          DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
+          ARCHIVE=".work/archives/${DC}.tar.gz"
+
+          if [ ! -s "$ARCHIVE" ]; then
+            echo "❌ 缺少或空压缩包: $ARCHIVE" >&2
+            ls -lh .work/archives
+            exit 1
+          fi
+
+          mkdir -p ".work/dates/${DC}"
+          gzip -t "$ARCHIVE"
+          tar xzf "$ARCHIVE" -C ".work/dates/${DC}"
+
+          python3 stock-grabber/hicccx999/extract_base_pankou.py \
+            --target-date "$DD" \
+            --dat-dir ".work/dates/${DC}" \
+            --output-dir .work/output \
+            --grabber-dir stock-grabber \
+            --mining-dir stock-mining \
+            --all-stocks-json stock-grabber/data/all_stocks.json \
+            --shard-index ${{ matrix.shard }} \
+            --shard-total ${{ inputs.shards }}
+
+          rm -rf ".work/dates/${DC}"
+          echo "✅ shard${{ matrix.shard }}: $DC 完成"
+
+      - name: 上传分片结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: pankou-${{ inputs.date }}-shard-${{ matrix.shard }}
+          path: .work/output/
+          if-no-files-found: ignore
+          retention-days: 1
+
+  merge-and-push:
+    needs: extract-shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: gp-features-base-pankou-push
+      cancel-in-progress: false
+    steps:
+      - name: 下载所有分片
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pankou-${{ inputs.date }}-shard-*
+          path: .work/shards/
+          merge-multiple: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: 安装依赖
+        run: pip install pandas pyarrow
+
+      - name: 合并分片
+        id: merge
+        env:
+          TARGET_DATE: ${{ inputs.date }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import pandas as pd
+
+          dc = os.environ["TARGET_DATE"]
+          year = dc[:4]
+          shard_dir = Path(".work/shards")
+          out_file = Path(".work/merged") / year / f"{dc}.parquet"
+          out_file.parent.mkdir(parents=True, exist_ok=True)
+
+          files = sorted(shard_dir.glob(f"{dc}_shard*.parquet"))
+          if not files:
+              print(f"⚠️ {dc}: 无分片产物")
+              raise SystemExit(0)
+
+          df = pd.concat([pd.read_parquet(p) for p in files], ignore_index=True)
+          df.sort_values("secid", inplace=True)
+          df.drop_duplicates(subset=["secid"], keep="first", inplace=True)
+          df.to_parquet(out_file, compression="zstd", index=False)
+          print(f"✅ {dc}: {len(df)} stocks ({len(files)} shards, {out_file.stat().st_size/1024:.0f}KB)")
+          PY
+
+          DC="${{ inputs.date }}"
+          YEAR="${DC:0:4}"
+          if [ -f ".work/merged/${YEAR}/${DC}.parquet" ]; then
+            echo "has_merged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_merged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 推送到 gp-features
+        if: steps.merge.outputs.has_merged == 'true'
+        env:
+          TARGET_DATE: ${{ inputs.date }}
+          PUSH_TOKEN: ${{ secrets.LARKSELF_PAT }}
+        run: |
+          set -euo pipefail
+
+          DC="$TARGET_DATE"
+          YEAR="${DC:0:4}"
+
+          git clone --depth 1 --filter=blob:none --no-tags --sparse \
+            "https://x-access-token:${PUSH_TOKEN}@github.com/larkself/gp-features.git" \
+            .work/gp-features
+
+          cd .work/gp-features
+          git sparse-checkout set base/pankou
+          git checkout
+
+          mkdir -p "base/pankou/${YEAR}"
+          cp "../merged/${YEAR}/${DC}.parquet" "base/pankou/${YEAR}/${DC}.parquet"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "base/pankou/${YEAR}/${DC}.parquet"
+
+          if git diff --cached --quiet; then
+            echo "ℹ️ ${DC} 无变更, 跳过提交"
+            exit 0
+          fi
+
+          git commit -m "base/pankou: ${DC}"
+
+          for TRY in 1 2 3 4 5; do
+            if git push; then
+              echo "✅ ${DC} 推送成功"
+              exit 0
+            fi
+            echo "⚠️ push 失败, 尝试 rebase 后重试 (${TRY}/5)"
+            git pull --rebase
+            sleep $((TRY * 2))
+          done
+
+          echo "❌ ${DC} push 连续失败" >&2
+          exit 1
