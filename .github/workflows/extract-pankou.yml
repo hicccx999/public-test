@@ -55,13 +55,14 @@ jobs:
           FORCE="${{ inputs.force }}"
           DATES="$ALL"
           if [ "$FORCE" != "true" ]; then
-            git clone --depth 1 \
-              "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
-              .work/gp-features 2>/dev/null || true
+            # 用 GitHub API 检查文件是否存在, 避免克隆整个仓库
             DATES=""
             for D in $ALL; do
               YEAR=${D:0:4}
-              if [ -f ".work/gp-features/base/pankou/${YEAR}/${D}.parquet" ]; then
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                -H "Authorization: token ${{ secrets.LARKSELF_PAT }}" \
+                "https://api.github.com/repos/larkself/gp-features/contents/base/pankou/${YEAR}/${D}.parquet")
+              if [ "$HTTP_CODE" = "200" ]; then
                 echo "⏭️ $D 已存在, 跳过"
               else
                 DATES="${DATES:+$DATES }$D"
@@ -92,22 +93,38 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: 克隆日期仓库 & 打包
+        env:
+          CLONE_TOKEN: ${{ secrets.LARKSELF_PAT }}
         run: |
-          mkdir -p .work/archives
-          for DC in ${{ needs.prepare.outputs.dates }}; do
-            DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
-            echo "📦 克隆 $DD ..."
-            rm -rf .work/date-repo
-            git clone --depth 1 --filter=blob:none --sparse \
-              "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/${DD}.git" \
-              .work/date-repo
-            cd .work/date-repo && git sparse-checkout set raw/pankou && git checkout && cd ../..
+          # ── Git 性能调优 ──
+          git config --global protocol.version 2
+          git config --global http.postBuffer 524288000
+          git config --global core.compression 0
+          git config --global pack.threads 0
 
-            tar czf ".work/archives/${DC}.tar.gz" -C .work/date-repo raw/pankou
-            N=$(find .work/date-repo/raw/pankou -name '*.dat' | wc -l)
+          mkdir -p .work/archives
+
+          # ── 单日期克隆函数 ──
+          clone_one() {
+            local DC="$1" DD WORKDIR N SZ
+            DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
+            WORKDIR=".work/date-repo-${DC}"
+            echo "📦 [$DC] 克隆 ${DD} ..."
+            git clone --depth 1 --filter=blob:none --no-tags --sparse \
+              "https://x-access-token:${CLONE_TOKEN}@github.com/larkself/${DD}.git" \
+              "$WORKDIR" 2>&1 | sed "s/^/[$DC] /"
+            (cd "$WORKDIR" && git sparse-checkout set raw/pankou && git checkout) 2>&1 | sed "s/^/[$DC] /"
+            tar czf ".work/archives/${DC}.tar.gz" -C "$WORKDIR" raw/pankou
+            N=$(find "$WORKDIR/raw/pankou" -name '*.dat' | wc -l)
             SZ=$(du -sh ".work/archives/${DC}.tar.gz" | cut -f1)
-            echo "✅ $DC: ${N} .dat → ${SZ}"
-          done
+            echo "✅ [$DC] ${N} .dat → ${SZ}"
+            rm -rf "$WORKDIR"
+          }
+          export -f clone_one
+
+          # ── 最多 4 个并行克隆 ──
+          echo "${{ needs.prepare.outputs.dates }}" | tr ' ' '\n' | \
+            xargs -P 4 -I {} bash -c 'clone_one "$@"' _ {}
 
       - name: 上传日期数据包
         uses: actions/upload-artifact@v4
@@ -265,9 +282,10 @@ jobs:
       - name: 推送到 gp-features
         if: steps.merge.outputs.has_merged == 'true'
         run: |
-          git clone --depth 1 \
+          git clone --depth 1 --filter=blob:none --no-tags --sparse \
             "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
             .work/gp-features
+          cd .work/gp-features && git sparse-checkout set base/pankou && git checkout && cd ../..
 
           mkdir -p .work/gp-features/base/pankou
           cp -r .work/merged/*/ .work/gp-features/base/pankou/
