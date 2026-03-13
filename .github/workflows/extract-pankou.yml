@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       dates:
-        description: "日期: YYYYMMDD 或 YYYYMMDD~YYYYMMDD, 多个逗号分隔, 留空=当天"
+        description: "日期: YYYYMMDD 或 YYYYMMDD~YYYYMMDD, 多个逗号分隔, 留空=当天, mini-10=最小日期向前10个交易日"
         required: false
         type: string
       force:
@@ -91,8 +91,93 @@ jobs:
             date -d "${compact:0:4}-${compact:4:2}-${compact:6:2}" +%Y%m%d 2>/dev/null || return 1
           }
 
-          INPUT="${{ inputs.dates }}"
-          [ -z "$INPUT" ] && INPUT=$(TZ=Asia/Shanghai date +%Y%m%d)
+          RAW_INPUT="${{ inputs.dates }}"
+          INPUT=$(echo "$RAW_INPUT" | xargs)
+          if [ -z "$INPUT" ]; then
+            INPUT=$(TZ=Asia/Shanghai date +%Y%m%d)
+          elif [ "$INPUT" = "mini-10" ]; then
+            echo "🧩 mini-10 模式: 基于 gp-features/base/pankou 最早日期向前回溯 10 个交易日"
+            export GH_TOKEN="${{ secrets.LARKSELF_PAT }}"
+            INPUT=$(python3 - <<'PY'
+            import bisect
+            import json
+            import os
+            import re
+            import sys
+            import urllib.error
+            import urllib.parse
+            import urllib.request
+
+            OWNER = "larkself"
+            REPO = "gp-features"
+            REF = "main"
+
+            def fail(msg: str) -> None:
+                print(f"❌ {msg}", file=sys.stderr)
+                sys.exit(1)
+
+            with open(".work/stock-grabber/data/trade_date.json", encoding="utf-8") as f:
+                trade_dates = [d.replace("-", "") for d in json.load(f).get("trade_dates", [])]
+            trade_dates = sorted(set(trade_dates))
+            if not trade_dates:
+                fail("trade_date.json 没有交易日数据")
+
+            token = os.environ.get("GH_TOKEN", "")
+            headers = {"Accept": "application/vnd.github+json"}
+            if token:
+                headers["Authorization"] = f"token {token}"
+
+            def list_dir(path: str) -> list[dict]:
+                quoted_path = urllib.parse.quote(path)
+                url = f"https://api.github.com/repos/{OWNER}/{REPO}/contents/{quoted_path}?ref={REF}"
+                req = urllib.request.Request(url, headers=headers)
+                try:
+                    with urllib.request.urlopen(req) as resp:
+                        payload = json.load(resp)
+                except urllib.error.HTTPError as exc:
+                    detail = exc.read().decode("utf-8", "ignore")
+                    fail(f"读取 {path} 失败: HTTP {exc.code} {detail[:200]}")
+                except urllib.error.URLError as exc:
+                    fail(f"读取 {path} 失败: {exc.reason}")
+                if not isinstance(payload, list):
+                    fail(f"{path} 不是目录")
+                return payload
+
+            year_dirs = sorted(
+                item.get("name", "")
+                for item in list_dir("base/pankou")
+                if item.get("type") == "dir" and re.fullmatch(r"\d{4}", item.get("name", ""))
+            )
+            if not year_dirs:
+                fail("base/pankou 下没有年份目录")
+
+            min_existing = None
+            for year in year_dirs:
+                dates_in_year = []
+                for item in list_dir(f"base/pankou/{year}"):
+                    if item.get("type") != "file":
+                        continue
+                    match = re.fullmatch(r"(\d{8})\.parquet", item.get("name", ""))
+                    if match:
+                        dates_in_year.append(match.group(1))
+                if dates_in_year:
+                    min_existing = min(dates_in_year)
+                    break
+
+            if not min_existing:
+                fail("base/pankou 下未找到 parquet 日期文件")
+
+            idx = bisect.bisect_left(trade_dates, min_existing)
+            targets = trade_dates[max(0, idx - 10):idx]
+            print(",".join(targets))
+            PY
+            )
+            if [ -z "$INPUT" ]; then
+              echo "⚠️ mini-10 没有可回溯的交易日"
+            else
+              echo "📅 mini-10 解析结果: $INPUT"
+            fi
+          fi
 
           ALL=""
           IFS=',' read -ra PARTS <<< "$INPUT"
