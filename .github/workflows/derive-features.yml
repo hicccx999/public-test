@@ -1,9 +1,6 @@
 name: Derive Features
 
 on:
-  workflow_run:
-    workflows: ["Extract Base Pankou"]
-    types: [completed]
   workflow_dispatch:
     inputs:
       dates:
@@ -23,10 +20,8 @@ jobs:
   derive:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    # 只在上游成功时触发 (workflow_run) 或手动触发
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+    # 仅允许手动触发
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - name: Parse dates
         id: dates
