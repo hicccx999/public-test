@@ -112,10 +112,11 @@ jobs:
           ")
           echo "matrix=${DATES}" >> "$GITHUB_OUTPUT"
 
-  push:
+  push-and-extract:
     needs: [collect-dates]
     if: needs.collect-dates.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.collect-dates.outputs.dates_matrix) }}
@@ -138,18 +139,76 @@ jobs:
           REPO_OWNER: larkself
           REPO_TOKEN: ${{ secrets.LARKSELF_PAT }}
           DATA_DIR: data/dl_output
-          PUSH_BATCH_SIZE: "500"
         run: python3 scripts/push_date_repo.py
 
-  extract:
-    needs: [push, collect-dates]
-    if: needs.push.result == 'success'
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.collect-dates.outputs.dates_matrix) }}
-    uses: ./.github/workflows/extract-pankou-by-date.yml
-    with:
-      date: ${{ matrix.date }}
-    secrets:
-      GRABBER_PAT: ${{ secrets.GRABBER_PAT }}
-      LARKSELF_PAT: ${{ secrets.LARKSELF_PAT }}
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: pip install numpy pandas pyarrow zstandard
+
+      - name: 提取特征 (${{ matrix.date }})
+        run: |
+          set -euo pipefail
+          DC="${{ matrix.date }}"
+          DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
+
+          # dat 文件已在 data/dl_output 中, 无需再克隆日期仓库
+          python3 hicccx999/extract_base_pankou.py \
+            --target-date "$DD" \
+            --dat-dir data/dl_output/"$DD" \
+            --output-dir output \
+            --grabber-dir . \
+            --all-stocks-json data/all_stocks.json
+
+      - name: 推送到 gp-features (${{ matrix.date }})
+        env:
+          PUSH_TOKEN: ${{ secrets.LARKSELF_PAT }}
+        run: |
+          set -euo pipefail
+          DC="${{ matrix.date }}"
+          YEAR="${DC:0:4}"
+
+          if [ ! -f "output/${DC}.parquet" ]; then
+            echo "⚠️ ${DC}: 无产出文件, 跳过推送"
+            exit 0
+          fi
+
+          git clone --depth 1 --filter=blob:none --no-tags --sparse \
+            "https://x-access-token:${PUSH_TOKEN}@github.com/larkself/gp-features.git" \
+            gp-features
+
+          cd gp-features
+          git sparse-checkout set base/pankou
+          git checkout
+
+          mkdir -p "base/pankou/${YEAR}"
+          cp "../output/${DC}.parquet" "base/pankou/${YEAR}/${DC}.parquet"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "base/pankou/${YEAR}/${DC}.parquet"
+
+          if git diff --cached --quiet; then
+            echo "ℹ️ ${DC} 无变更, 跳过提交"
+            exit 0
+          fi
+
+          git commit -m "base/pankou: ${DC}"
+
+          sleep $((RANDOM % 30))
+
+          for TRY in 1 2 3 4 5 6 7 8 9 10; do
+            if git push; then
+              echo "✅ ${DC} 推送成功"
+              exit 0
+            fi
+            echo "⚠️ push 失败, 尝试 rebase 后重试 (${TRY}/10)"
+            git pull --rebase
+            sleep $((TRY * 3))
+          done
+
+          echo "❌ ${DC} push 连续失败" >&2
+          exit 1
