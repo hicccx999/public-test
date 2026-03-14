@@ -57,7 +57,7 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     concurrency:
-      group: download-data-${{ matrix.date }}
+      group: download-data-${{ matrix.date }}-${{ matrix.shard }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
