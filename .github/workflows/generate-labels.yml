@@ -1,0 +1,157 @@
+name: Generate Labels
+
+on:
+  workflow_dispatch:
+    inputs:
+      dates:
+        description: "日期: YYYYMMDD 或 YYYYMMDD~YYYYMMDD, 多个逗号分隔, 留空=当天"
+        required: false
+        type: string
+      force:
+        description: "强制生成 (已存在也重新生成)"
+        required: false
+        type: boolean
+        default: false
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Parse dates
+        id: dates
+        run: |
+          INPUT="${{ inputs.dates }}"
+          if [ -z "$INPUT" ]; then
+            INPUT=$(TZ=Asia/Shanghai date +%Y%m%d)
+          fi
+
+          DATES=""
+          IFS=',' read -ra PARTS <<< "$INPUT"
+          for part in "${PARTS[@]}"; do
+            part=$(echo "$part" | xargs)
+            if [[ "$part" == *"~"* ]]; then
+              START=$(echo "$part" | cut -d'~' -f1)
+              END=$(echo "$part" | cut -d'~' -f2)
+              CUR="$START"
+              while [[ "$CUR" -le "$END" ]]; do
+                DATES="${DATES:+$DATES,}$CUR"
+                CUR=$(date -d "${CUR:0:4}-${CUR:4:2}-${CUR:6:2} + 1 day" +%Y%m%d)
+              done
+            else
+              DATES="${DATES:+$DATES,}$part"
+            fi
+          done
+
+          echo "all=$DATES" >> "$GITHUB_OUTPUT"
+          echo "📅 展开日期: $DATES"
+
+      - name: Checkout stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+          ref: main
+          path: stock-grabber
+          sparse-checkout: |
+            data/trade_date.json
+            labeling
+
+      - name: Filter trade dates & check existing
+        id: filter
+        shell: python3 {0}
+        env:
+          ALL_DATES: ${{ steps.dates.outputs.all }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          import json, os, subprocess, sys
+
+          all_str = os.environ.get("ALL_DATES", "")
+          force = os.environ.get("FORCE", "false") == "true"
+          gh_output = os.environ["GITHUB_OUTPUT"]
+
+          # 加载交易日历
+          with open("stock-grabber/data/trade_date.json") as f:
+              td = json.load(f)
+          trade_set = set(d.replace("-", "") for d in td["trade_dates"])
+
+          # 筛选有效交易日
+          all_dates = [d.strip() for d in all_str.split(",") if d.strip()]
+          valid = sorted(d for d in all_dates if d in trade_set)
+
+          # 检查已存在的标签
+          if not force:
+              try:
+                  subprocess.run([
+                      "git", "clone", "--depth", "1", "--filter=blob:none", "--sparse",
+                      f"https://x-access-token:{os.environ.get('LARKSELF_PAT', '')}@github.com/larkself/gp-features.git",
+                      ".work/check-existing"
+                  ], check=True, capture_output=True, env={**os.environ, "LARKSELF_PAT": ""})
+                  subprocess.run(
+                      ["git", "sparse-checkout", "set", "labels/"],
+                      cwd=".work/check-existing", check=True, capture_output=True
+                  )
+                  import pathlib
+                  existing = set()
+                  for p in pathlib.Path(".work/check-existing/labels").rglob("labels_*.parquet"):
+                      d = p.stem.replace("labels_", "")
+                      existing.add(d)
+                  before = len(valid)
+                  valid = [d for d in valid if d not in existing]
+                  print(f"⏭️ 跳过 {before - len(valid)} 已存在日期")
+              except Exception as e:
+                  print(f"⚠️ 检查已存在标签失败: {e}, 继续处理全部")
+
+          if not valid:
+              print("⏭️ 无待处理日期")
+              with open(gh_output, "a") as f:
+                  f.write("has_work=false\n")
+                  f.write("dates=\n")
+              sys.exit(0)
+
+          dates_str = ",".join(valid)
+          print(f"📅 {len(valid)} 个待处理交易日")
+          with open(gh_output, "a") as f:
+              f.write("has_work=true\n")
+              f.write(f"dates={dates_str}\n")
+
+      - name: Clone gp-features
+        if: steps.filter.outputs.has_work == 'true'
+        run: |
+          git clone \
+            "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
+            .work/gp-features
+
+      - name: Setup Python
+        if: steps.filter.outputs.has_work == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        if: steps.filter.outputs.has_work == 'true'
+        run: pip install numpy pandas pyarrow
+
+      - name: Generate labels
+        if: steps.filter.outputs.has_work == 'true'
+        run: |
+          echo "🔄 生成标签: ${{ steps.filter.outputs.dates }}"
+          python3 stock-grabber/labeling/generate_labels.py \
+            --target-dates "${{ steps.filter.outputs.dates }}" \
+            --derived-dir .work/gp-features/derived \
+            --output-dir .work/gp-features/labels \
+            --trade-date-json stock-grabber/data/trade_date.json
+
+      - name: Push labels
+        if: steps.filter.outputs.has_work == 'true'
+        run: |
+          cd .work/gp-features
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add labels/
+          git diff --cached --quiet || git commit -m "labels: ${{ steps.filter.outputs.dates }}"
+          git push
