@@ -56,9 +56,6 @@ jobs:
     if: needs.prepare.outputs.should_run == 'true'
     needs: prepare
     runs-on: ubuntu-latest
-    concurrency:
-      group: download-data-${{ matrix.date }}-${{ matrix.shard }}
-      cancel-in-progress: false
     strategy:
       fail-fast: false
       max-parallel: 20
@@ -85,14 +82,15 @@ jobs:
           DAT_ACTIVE_MIN_SIZE: "2000"
         run: python3 scripts/download_data.py
 
-      - name: 本分片完成后推送日期仓库
+      - name: 上传分片数据
         if: success() && !cancelled()
-        env:
-          REPO_OWNER: larkself
-          REPO_TOKEN: ${{ secrets.LARKSELF_PAT }}
-          DATA_DIR: data/dl_output
-          PUSH_BATCH_SIZE: "500"
-        run: python3 scripts/push_date_repo.py
+        uses: actions/upload-artifact@v4
+        with:
+          name: dat-${{ matrix.date }}-shard${{ matrix.shard }}
+          path: data/dl_output/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: ignore
 
   collect-dates:
     if: needs.prepare.outputs.should_run == 'true' && !cancelled()
@@ -114,9 +112,38 @@ jobs:
           ")
           echo "matrix=${DATES}" >> "$GITHUB_OUTPUT"
 
-  extract:
+  push:
     needs: [collect-dates]
     if: needs.collect-dates.result == 'success'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.collect-dates.outputs.dates_matrix) }}
+    steps:
+      - name: 检出 stock-grabber
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+
+      - name: 下载所有分片 artifact (${{ matrix.date }})
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dat-${{ matrix.date }}-*
+          path: data/dl_output
+          merge-multiple: true
+
+      - name: 推送日期仓库 (${{ matrix.date }})
+        env:
+          REPO_OWNER: larkself
+          REPO_TOKEN: ${{ secrets.LARKSELF_PAT }}
+          DATA_DIR: data/dl_output
+          PUSH_BATCH_SIZE: "500"
+        run: python3 scripts/push_date_repo.py
+
+  extract:
+    needs: [push, collect-dates]
+    if: needs.push.result == 'success'
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.collect-dates.outputs.dates_matrix) }}
