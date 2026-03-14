@@ -15,13 +15,16 @@ on:
 
 env:
   PYTHON_VERSION: "3.11"
+  SHARD_SIZE: "25"
 
 jobs:
-  derive:
+  # ── 1. 展开日期 → 过滤交易日 → 拆分分片 ──
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # 仅允许手动触发
     if: github.event_name == 'workflow_dispatch'
+    outputs:
+      shards: ${{ steps.shard.outputs.shards }}
+      has_work: ${{ steps.shard.outputs.has_work }}
     steps:
       - name: Parse dates
         id: dates
@@ -40,23 +43,106 @@ jobs:
               END=$(echo "$part" | cut -d'~' -f2)
               CUR="$START"
               while [[ "$CUR" -le "$END" ]]; do
-                DATES="${DATES:+$DATES }$CUR"
+                DATES="${DATES:+$DATES,}$CUR"
                 CUR=$(date -d "${CUR:0:4}-${CUR:4:2}-${CUR:6:2} + 1 day" +%Y%m%d)
               done
             else
-              DATES="${DATES:+$DATES }$part"
+              DATES="${DATES:+$DATES,}$part"
             fi
           done
 
           echo "all=$DATES" >> "$GITHUB_OUTPUT"
-          echo "📅 待处理日期: $DATES"
-
-      - name: Checkout public-test
-        uses: actions/checkout@v4
-        with:
-          path: public-test
+          echo "📅 展开日期: $DATES"
 
       - name: Checkout stock-grabber (trade_date.json)
+        uses: actions/checkout@v4
+        with:
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+          ref: main
+          path: stock-grabber
+          sparse-checkout: data/trade_date.json
+
+      - name: Check existing derived
+        id: existing
+        if: inputs.force != true
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
+            .work/gp-features
+          cd .work/gp-features
+          git sparse-checkout set derived/
+          # 提取已有 derived 日期 (market_structure_YYYYMMDD.parquet)
+          EXISTING=$(find derived/ -name "market_structure_*.parquet" 2>/dev/null \
+            | sed 's/.*market_structure_//' | sed 's/\.parquet//' \
+            | sort -u | tr '\n' ',' | sed 's/,$//')
+          echo "dates=$EXISTING" >> "$GITHUB_OUTPUT"
+          echo "📦 已存在: $EXISTING"
+
+      - name: Build shard matrix
+        id: shard
+        shell: python3 {0}
+        env:
+          ALL_DATES: ${{ steps.dates.outputs.all }}
+          EXISTING_DATES: ${{ steps.existing.outputs.dates }}
+          FORCE: ${{ inputs.force }}
+          SHARD_SIZE_ENV: ${{ env.SHARD_SIZE }}
+        run: |
+          import json, os, sys
+
+          all_str = os.environ.get("ALL_DATES", "")
+          existing_str = os.environ.get("EXISTING_DATES", "")
+          force = os.environ.get("FORCE", "false") == "true"
+          shard_size = int(os.environ.get("SHARD_SIZE_ENV", "25"))
+          gh_output = os.environ["GITHUB_OUTPUT"]
+
+          # Load trade dates
+          with open("stock-grabber/data/trade_date.json") as f:
+              td = json.load(f)
+          trade_set = set(d.replace("-", "") for d in td["trade_dates"])
+
+          # Filter to valid trade dates
+          all_dates = [d.strip() for d in all_str.split(",") if d.strip()]
+          valid = sorted(d for d in all_dates if d in trade_set)
+
+          # Skip already-existing
+          if not force and existing_str:
+              existing = set(existing_str.split(","))
+              before = len(valid)
+              valid = [d for d in valid if d not in existing]
+              print(f"⏭️ 跳过 {before - len(valid)} 已存在日期")
+
+          if not valid:
+              print("⏭️ 无待处理日期")
+              with open(gh_output, "a") as f:
+                  f.write("has_work=false\n")
+                  f.write("shards=[]\n")
+              sys.exit(0)
+
+          # Split into shards
+          shards = []
+          for i in range(0, len(valid), shard_size):
+              chunk = valid[i : i + shard_size]
+              shards.append({"dates": ",".join(chunk), "id": len(shards)})
+
+          matrix = json.dumps(shards)
+          print(f"📅 {len(valid)} 交易日 → {len(shards)} 分片")
+          with open(gh_output, "a") as f:
+              f.write("has_work=true\n")
+              f.write(f"shards={matrix}\n")
+
+  # ── 2. 并行派生 (每个分片批量处理 ~25 天) ──
+  derive:
+    needs: prepare
+    if: needs.prepare.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.shards) }}
+      fail-fast: false
+    steps:
+      - name: Checkout stock-grabber
         uses: actions/checkout@v4
         with:
           repository: hiyishui/stock-grabber
@@ -67,7 +153,7 @@ jobs:
             data/trade_date.json
             hicccx999
 
-      - name: Clone gp-features (含历史 base parquets)
+      - name: Clone gp-features (base parquets)
         run: |
           git clone \
             "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
@@ -81,44 +167,55 @@ jobs:
       - name: Install dependencies
         run: pip install numpy pandas pyarrow
 
-      - name: Derive features for each date
-        id: derive
+      - name: Derive features (batch)
         run: |
-          FORCE="${{ inputs.force }}"
-          PROCESSED=0
-          SKIPPED=0
+          echo "🔄 分片 ${{ matrix.shard.id }}: ${{ matrix.shard.dates }}"
+          python3 stock-grabber/hicccx999/derive_features.py \
+            --target-dates "${{ matrix.shard.dates }}" \
+            --base-dir .work/gp-features/base \
+            --output-dir .work/derived \
+            --trade-date-json stock-grabber/data/trade_date.json
 
-          for DATE_COMPACT in ${{ steps.dates.outputs.all }}; do
-            DATE_DASH="${DATE_COMPACT:0:4}-${DATE_COMPACT:4:2}-${DATE_COMPACT:6:2}"
+      - name: Upload derived parquets
+        uses: actions/upload-artifact@v4
+        with:
+          name: derived-shard-${{ matrix.shard.id }}
+          path: .work/derived/
+          retention-days: 1
+          compression-level: 0
 
-            # Check if already derived
-            if [ "$FORCE" != "true" ] && ls .work/gp-features/derived/*/${DATE_COMPACT}.parquet >/dev/null 2>&1; then
-              echo "⏭️ 跳过 $DATE_COMPACT (已存在)"
-              SKIPPED=$((SKIPPED + 1))
-              continue
-            fi
+  # ── 3. 汇总推送 ──
+  push:
+    needs: [prepare, derive]
+    if: needs.prepare.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Clone gp-features
+        run: |
+          git clone --depth 1 \
+            "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
+            .work/gp-features
 
-            echo "🔄 处理 $DATE_COMPACT ..."
+      - name: Download all derived artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: derived-shard-*
+          merge-multiple: true
+          path: .work/artifacts
 
-            python3 stock-grabber/hicccx999/derive_features.py \
-              --target-date "$DATE_DASH" \
-              --base-dir .work/gp-features/base \
-              --output-dir .work/gp-features/derived \
-              --trade-date-json stock-grabber/data/trade_date.json
-
-            PROCESSED=$((PROCESSED + 1))
-            echo "✅ $DATE_COMPACT 完成"
-          done
-
-          echo "📊 处理: $PROCESSED, 跳过: $SKIPPED"
-          echo "processed=$PROCESSED" >> "$GITHUB_OUTPUT"
+      - name: Copy to gp-features
+        run: |
+          mkdir -p .work/gp-features/derived
+          cp .work/artifacts/*.parquet .work/gp-features/derived/
+          COUNT=$(ls .work/gp-features/derived/*.parquet 2>/dev/null | wc -l)
+          echo "📦 共 $COUNT 个 parquet 文件"
 
       - name: Push derived features
-        if: steps.derive.outputs.processed != '0'
         run: |
           cd .work/gp-features
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add derived/
-          git diff --cached --quiet || git commit -m "derived: ${{ steps.dates.outputs.all }}"
+          git diff --cached --quiet || git commit -m "derived: batch update"
           git push
