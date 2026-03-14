@@ -7,15 +7,8 @@ on:
         description: "日期: YYYYMMDD"
         required: true
         type: string
-      shards:
-        description: "股票分片数"
-        required: false
-        default: 20
-        type: number
     secrets:
       GRABBER_PAT:
-        required: true
-      HICCC_PAT:
         required: true
       LARKSELF_PAT:
         required: true
@@ -24,377 +17,59 @@ env:
   PYTHON_VERSION: "3.11"
 
 jobs:
-  prepare-shards:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.shards.outputs.matrix }}
-    steps:
-      - name: 生成分片 matrix
-        id: shards
-        run: |
-          set -euo pipefail
-          N=${{ inputs.shards }}
-          if [ "$N" -lt 1 ] || [ "$N" -gt 20 ]; then
-            echo "❌ shards 必须在 1~20 之间, 当前: $N" >&2
-            exit 1
-          fi
-
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          n = int("${{ inputs.shards }}")
-          print(f"matrix={json.dumps(list(range(n)))}")
-          PY
-
-  build-shard-packages:
-    needs: prepare-shards
+  extract-and-push:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: 下载共享源码依赖
-        uses: actions/download-artifact@v4
+      - name: 检出 stock-grabber 依赖
+        uses: actions/checkout@v4
         with:
-          name: shared-source-bundle
-          path: .work/sources/
+          repository: hiyishui/stock-grabber
+          token: ${{ secrets.GRABBER_PAT }}
+          ref: main
+          fetch-depth: 1
+          filter: blob:none
+          path: stock-grabber
+          sparse-checkout: |
+            tools/dat_to_dataframe.py
+            tools/stock_shares_parquet.py
+            data/gb/guben.parquet
+            data/all_stocks.json
+            features/dat_loader.py
+            features/features_daily.py
+            hicccx999/extract_base_pankou.py
+          sparse-checkout-cone-mode: false
 
-      - name: 解压 stock-grabber
-        run: |
-          set -euo pipefail
-          mkdir -p stock-grabber
-          tar xzf .work/sources/stock-grabber.tar.gz -C stock-grabber
-
-      - name: 克隆日期仓库并按 shard 打包
+      - name: 克隆日期仓库
         env:
-          TARGET_DATE: ${{ inputs.date }}
-          SHARDS: ${{ inputs.shards }}
           CLONE_TOKEN: ${{ secrets.LARKSELF_PAT }}
         run: |
           set -euo pipefail
+          DC="${{ inputs.date }}"
+          DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
 
           git config --global protocol.version 2
           git config --global http.postBuffer 524288000
           git config --global core.compression 0
-          git config --global pack.threads 0
-
-          DC="$TARGET_DATE"
-          DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
-          WORKDIR=".work/date-repo-${DC}"
-          SHARD_DIR=".work/shard_archives"
-
-          mkdir -p "$SHARD_DIR"
 
           for TRY in 1 2 3; do
-            rm -rf "$WORKDIR"
-            echo "📦 [$DC] 克隆 ${DD} (attempt ${TRY}/3) ..."
+            rm -rf date-repo
+            echo "📦 克隆 ${DD} (attempt ${TRY}/3) ..."
 
             if git clone --depth 1 --filter=blob:none --no-tags --sparse \
               "https://x-access-token:${CLONE_TOKEN}@github.com/larkself/${DD}.git" \
-              "$WORKDIR" \
-              && (cd "$WORKDIR" && git sparse-checkout set raw/pankou && git checkout); then
+              date-repo \
+              && (cd date-repo && git sparse-checkout set raw/pankou && git checkout); then
               break
             fi
 
             if [ "$TRY" -eq 3 ]; then
-              echo "❌ [$DC] 连续 3 次克隆失败" >&2
+              echo "❌ 连续 3 次克隆失败" >&2
               exit 1
             fi
-            echo "⚠️ [$DC] 克隆失败, 准备重试"
+            echo "⚠️ 克隆失败, 准备重试"
             sleep $((TRY * 2))
           done
-
-          python3 - <<'PY'
-          import hashlib
-          import json
-          import tarfile
-          from pathlib import Path
-
-          dc = "${{ inputs.date }}"
-          dd = f"{dc[:4]}-{dc[4:6]}-{dc[6:8]}"
-          shards = int("${{ inputs.shards }}")
-          workdir = Path(f".work/date-repo-{dc}")
-          pankou_dir = workdir / "raw" / "pankou"
-          all_stocks_path = Path("stock-grabber/data/all_stocks.json")
-          out_dir = Path(".work/shard_archives")
-          out_dir.mkdir(parents=True, exist_ok=True)
-
-          if not pankou_dir.is_dir():
-              raise SystemExit(f"❌ 盘口目录不存在: {pankou_dir}")
-
-          data = json.loads(all_stocks_path.read_text(encoding="utf-8"))
-          listed = set()
-          for prefix, key in (("sh", "sh"), ("sz", "sz"), ("bj", "bj")):
-              for item in data.get(key, []):
-                  list_date = item.get("list_date", "")
-                  if list_date and list_date <= dd:
-                      listed.add(f"{prefix}{item['code']}")
-
-          files = sorted([p for p in pankou_dir.glob("*.dat") if p.stem in listed])
-          secids = sorted(p.stem for p in files)
-          shard_map = {i: [] for i in range(shards)}
-          for i, secid in enumerate(secids):
-              shard_map[i % shards].append(secid)
-
-          print(f"📊 {dc}: listed dat files = {len(secids)}, shards = {shards}")
-
-          for shard in range(shards):
-              tar_path = out_dir / f"{dc}_shard{shard}.tar.gz"
-              with tarfile.open(tar_path, mode="w:gz") as tf:
-                  for secid in shard_map[shard]:
-                      src = pankou_dir / f"{secid}.dat"
-                      if src.is_file():
-                          tf.add(src, arcname=f"raw/pankou/{src.name}")
-
-              digest = hashlib.sha256(tar_path.read_bytes()).hexdigest()
-              (out_dir / f"{dc}_shard{shard}.sha256").write_text(
-                  f"{digest}  {dc}_shard{shard}.tar.gz\n",
-                  encoding="utf-8",
-              )
-              print(f"✅ shard{shard}: {len(shard_map[shard])} files")
-          PY
-
-          rm -rf "$WORKDIR"
-
-      - name: 上传 shard 0 数据包
-        if: ${{ inputs.shards > 0 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-0
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard0.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard0.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 1 数据包
-        if: ${{ inputs.shards > 1 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-1
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard1.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard1.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 2 数据包
-        if: ${{ inputs.shards > 2 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-2
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard2.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard2.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 3 数据包
-        if: ${{ inputs.shards > 3 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-3
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard3.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard3.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 4 数据包
-        if: ${{ inputs.shards > 4 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-4
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard4.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard4.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 5 数据包
-        if: ${{ inputs.shards > 5 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-5
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard5.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard5.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 6 数据包
-        if: ${{ inputs.shards > 6 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-6
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard6.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard6.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 7 数据包
-        if: ${{ inputs.shards > 7 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-7
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard7.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard7.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 8 数据包
-        if: ${{ inputs.shards > 8 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-8
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard8.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard8.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 9 数据包
-        if: ${{ inputs.shards > 9 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-9
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard9.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard9.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 10 数据包
-        if: ${{ inputs.shards > 10 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-10
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard10.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard10.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 11 数据包
-        if: ${{ inputs.shards > 11 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-11
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard11.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard11.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 12 数据包
-        if: ${{ inputs.shards > 12 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-12
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard12.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard12.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 13 数据包
-        if: ${{ inputs.shards > 13 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-13
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard13.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard13.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 14 数据包
-        if: ${{ inputs.shards > 14 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-14
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard14.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard14.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 15 数据包
-        if: ${{ inputs.shards > 15 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-15
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard15.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard15.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 16 数据包
-        if: ${{ inputs.shards > 16 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-16
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard16.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard16.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 17 数据包
-        if: ${{ inputs.shards > 17 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-17
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard17.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard17.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 18 数据包
-        if: ${{ inputs.shards > 18 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-18
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard18.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard18.sha256
-          retention-days: 1
-          compression-level: 0
-
-      - name: 上传 shard 19 数据包
-        if: ${{ inputs.shards > 19 }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-19
-          path: |
-            .work/shard_archives/${{ inputs.date }}_shard19.tar.gz
-            .work/shard_archives/${{ inputs.date }}_shard19.sha256
-          retention-days: 1
-          compression-level: 0
-
-  extract-shards:
-    needs: [prepare-shards, build-shard-packages]
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ inputs.shards }}
-      matrix:
-        shard: ${{ fromJson(needs.prepare-shards.outputs.matrix) }}
-    steps:
-      - name: 下载共享源码依赖
-        uses: actions/download-artifact@v4
-        with:
-          name: shared-source-bundle
-          path: .work/sources/
-
-      - name: 解压源码依赖
-        run: |
-          set -euo pipefail
-          mkdir -p stock-grabber stock-mining
-          tar xzf .work/sources/stock-grabber.tar.gz -C stock-grabber
-          tar xzf .work/sources/stock-mining.tar.gz -C stock-mining
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -404,144 +79,44 @@ jobs:
       - name: 安装依赖
         run: pip install numpy pandas pyarrow zstandard
 
-      - name: 下载当前 shard 数据包
-        uses: actions/download-artifact@v4
-        with:
-          name: date-shard-${{ inputs.date }}-${{ matrix.shard }}
-          path: .work/shard_archives/
-
-      - name: 校验当前 shard 数据包
-        run: |
-          set -euo pipefail
-          DC="${{ inputs.date }}"
-          SHARD=${{ matrix.shard }}
-          ARCHIVE=".work/shard_archives/${DC}_shard${SHARD}.tar.gz"
-          CHECKSUM=".work/shard_archives/${DC}_shard${SHARD}.sha256"
-          test -f "$ARCHIVE"
-          test -f "$CHECKSUM"
-          (cd .work/shard_archives && sha256sum -c "${DC}_shard${SHARD}.sha256")
-
-      - name: 提取并处理 shard ${{ matrix.shard }}
+      - name: 提取特征
         run: |
           set -euo pipefail
           DC="${{ inputs.date }}"
           DD="${DC:0:4}-${DC:4:2}-${DC:6:2}"
-          SHARD=${{ matrix.shard }}
-          ARCHIVE=".work/shard_archives/${DC}_shard${SHARD}.tar.gz"
-
-          mkdir -p ".work/dates/${DC}/raw/pankou"
-          tar xzf "$ARCHIVE" -C ".work/dates/${DC}"
-
-          DAT_COUNT=$(find ".work/dates/${DC}/raw/pankou" -maxdepth 1 -name '*.dat' 2>/dev/null | wc -l | xargs)
-          if [ "$DAT_COUNT" = "0" ]; then
-            echo "ℹ️ shard${SHARD}: 无需处理 (0 files)"
-            exit 0
-          fi
 
           python3 stock-grabber/hicccx999/extract_base_pankou.py \
             --target-date "$DD" \
-            --dat-dir ".work/dates/${DC}" \
-            --output-dir .work/output \
+            --dat-dir date-repo \
+            --output-dir output \
             --grabber-dir stock-grabber \
-            --mining-dir stock-mining \
             --all-stocks-json stock-grabber/data/all_stocks.json
 
-          if [ -f ".work/output/${DC}.parquet" ]; then
-            mv ".work/output/${DC}.parquet" ".work/output/${DC}_shard${SHARD}.parquet"
-          fi
-
-          rm -rf ".work/dates/${DC}"
-          echo "✅ shard${SHARD}: $DC 完成"
-
-      - name: 上传分片结果
-        uses: actions/upload-artifact@v4
-        with:
-          name: pankou-${{ inputs.date }}-shard-${{ matrix.shard }}
-          path: .work/output/*_shard${{ matrix.shard }}.parquet
-          if-no-files-found: ignore
-          retention-days: 1
-
-  merge-and-push:
-    needs: extract-shards
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    concurrency:
-      group: gp-features-base-pankou-push
-      cancel-in-progress: false
-    steps:
-      - name: 下载所有分片
-        uses: actions/download-artifact@v4
-        with:
-          pattern: pankou-${{ inputs.date }}-shard-*
-          path: .work/shards/
-          merge-multiple: true
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: 安装依赖
-        run: pip install pandas pyarrow
-
-      - name: 合并分片
-        id: merge
-        env:
-          TARGET_DATE: ${{ inputs.date }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-          import pandas as pd
-
-          dc = os.environ["TARGET_DATE"]
-          year = dc[:4]
-          shard_dir = Path(".work/shards")
-          out_file = Path(".work/merged") / year / f"{dc}.parquet"
-          out_file.parent.mkdir(parents=True, exist_ok=True)
-
-          files = sorted(shard_dir.glob(f"{dc}_shard*.parquet"))
-          if not files:
-              print(f"⚠️ {dc}: 无分片产物")
-              raise SystemExit(0)
-
-          df = pd.concat([pd.read_parquet(p) for p in files], ignore_index=True)
-          df.sort_values("secid", inplace=True)
-          df.drop_duplicates(subset=["secid"], keep="first", inplace=True)
-          df.to_parquet(out_file, compression="zstd", index=False)
-          print(f"✅ {dc}: {len(df)} stocks ({len(files)} shards, {out_file.stat().st_size/1024:.0f}KB)")
-          PY
-
-          DC="${{ inputs.date }}"
-          YEAR="${DC:0:4}"
-          if [ -f ".work/merged/${YEAR}/${DC}.parquet" ]; then
-            echo "has_merged=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_merged=false" >> "$GITHUB_OUTPUT"
-          fi
+          rm -rf date-repo
 
       - name: 推送到 gp-features
-        if: steps.merge.outputs.has_merged == 'true'
         env:
-          TARGET_DATE: ${{ inputs.date }}
           PUSH_TOKEN: ${{ secrets.LARKSELF_PAT }}
         run: |
           set -euo pipefail
-
-          DC="$TARGET_DATE"
+          DC="${{ inputs.date }}"
           YEAR="${DC:0:4}"
+
+          if [ ! -f "output/${DC}.parquet" ]; then
+            echo "⚠️ ${DC}: 无产出文件, 跳过推送"
+            exit 0
+          fi
 
           git clone --depth 1 --filter=blob:none --no-tags --sparse \
             "https://x-access-token:${PUSH_TOKEN}@github.com/larkself/gp-features.git" \
-            .work/gp-features
+            gp-features
 
-          cd .work/gp-features
+          cd gp-features
           git sparse-checkout set base/pankou
           git checkout
 
           mkdir -p "base/pankou/${YEAR}"
-          cp "../merged/${YEAR}/${DC}.parquet" "base/pankou/${YEAR}/${DC}.parquet"
+          cp "../output/${DC}.parquet" "base/pankou/${YEAR}/${DC}.parquet"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -554,14 +129,17 @@ jobs:
 
           git commit -m "base/pankou: ${DC}"
 
-          for TRY in 1 2 3 4 5; do
+          # 随机延迟分散并行 push 冲突
+          sleep $((RANDOM % 30))
+
+          for TRY in 1 2 3 4 5 6 7 8 9 10; do
             if git push; then
               echo "✅ ${DC} 推送成功"
               exit 0
             fi
-            echo "⚠️ push 失败, 尝试 rebase 后重试 (${TRY}/5)"
+            echo "⚠️ push 失败, 尝试 rebase 后重试 (${TRY}/10)"
             git pull --rebase
-            sleep $((TRY * 2))
+            sleep $((TRY * 3))
           done
 
           echo "❌ ${DC} push 连续失败" >&2
