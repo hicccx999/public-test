@@ -72,7 +72,7 @@ jobs:
             .work/gp-features
           cd .work/gp-features
           git sparse-checkout set derived/
-          # 提取已有 derived 日期 (market_structure_YYYYMMDD.parquet)
+          # 提取已有 derived 日期 (YYYY/market_structure_YYYYMMDD.parquet)
           EXISTING=$(find derived/ -name "market_structure_*.parquet" 2>/dev/null \
             | sed 's/.*market_structure_//' | sed 's/\.parquet//' \
             | sort -u | tr '\n' ',' | sed 's/,$//')
@@ -206,9 +206,15 @@ jobs:
 
       - name: Copy to gp-features
         run: |
-          mkdir -p .work/gp-features/derived
-          cp .work/artifacts/*.parquet .work/gp-features/derived/
-          COUNT=$(ls .work/gp-features/derived/*.parquet 2>/dev/null | wc -l)
+          # artifacts 按年份子目录组织: YYYY/*.parquet
+          cd .work/artifacts
+          for year_dir in */; do
+            [ -d "$year_dir" ] || continue
+            mkdir -p "../.work/gp-features/derived/$year_dir"
+            cp "$year_dir"*.parquet "../.work/gp-features/derived/$year_dir"
+          done
+          cd ../..          
+          COUNT=$(find .work/gp-features/derived -name '*.parquet' | wc -l)
           echo "📦 共 $COUNT 个 parquet 文件"
 
       - name: Push derived features
