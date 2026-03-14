@@ -93,3 +93,36 @@ jobs:
           DATA_DIR: data/dl_output
           PUSH_BATCH_SIZE: "500"
         run: python3 scripts/push_date_repo.py
+
+  collect-dates:
+    if: needs.prepare.outputs.should_run == 'true' && !cancelled()
+    needs: [prepare, download]
+    runs-on: ubuntu-latest
+    outputs:
+      dates_matrix: ${{ steps.dates.outputs.matrix }}
+    steps:
+      - name: 提取唯一日期
+        id: dates
+        env:
+          MATRIX_JSON: ${{ needs.prepare.outputs.matrix }}
+        run: |
+          DATES=$(python3 -c "
+          import json, os
+          matrix = json.loads(os.environ['MATRIX_JSON'])
+          dates = sorted(set(item['date'] for item in matrix['include']))
+          print(json.dumps({'include': [{'date': d} for d in dates]}))
+          ")
+          echo "matrix=${DATES}" >> "$GITHUB_OUTPUT"
+
+  extract:
+    needs: [collect-dates]
+    if: needs.collect-dates.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.collect-dates.outputs.dates_matrix) }}
+    uses: ./.github/workflows/extract-pankou-by-date.yml
+    with:
+      date: ${{ matrix.date }}
+    secrets:
+      GRABBER_PAT: ${{ secrets.GRABBER_PAT }}
+      LARKSELF_PAT: ${{ secrets.LARKSELF_PAT }}
