@@ -153,11 +153,13 @@ jobs:
             data/trade_date.json
             hicccx999
 
-      - name: Clone gp-features (base parquets)
+      - name: Clone gp-features (base parquets only)
         run: |
-          git clone \
+          git clone --depth 1 --filter=blob:none --sparse \
             "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
             .work/gp-features
+          cd .work/gp-features
+          git sparse-checkout set base/
 
       - name: Setup Python
         uses: actions/setup-python@v5
