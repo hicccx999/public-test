@@ -186,19 +186,13 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  # ── 3. 汇总推送 ──
+  # ── 3. 按年份推送到 derive-{year} 仓库 ──
   push:
     needs: [prepare, derive]
     if: needs.prepare.outputs.has_work == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Clone gp-features
-        run: |
-          git clone --depth 1 \
-            "https://x-access-token:${{ secrets.LARKSELF_PAT }}@github.com/larkself/gp-features.git" \
-            .work/gp-features
-
       - name: Download all derived artifacts
         uses: actions/download-artifact@v4
         with:
@@ -206,34 +200,59 @@ jobs:
           merge-multiple: true
           path: .work/artifacts
 
-      - name: Copy to gp-features
+      - name: Push to derive-{year} repos
+        env:
+          GH_TOKEN: ${{ secrets.LARKSELF_PAT }}
         run: |
-          # artifacts 按年份子目录组织: YYYY/*.parquet
           cd .work/artifacts
           for year_dir in */; do
             [ -d "$year_dir" ] || continue
-            mkdir -p "../gp-features/derived/$year_dir"
-            cp "$year_dir"*.parquet "../gp-features/derived/$year_dir"
-          done
-          cd ../..
-          COUNT=$(find .work/gp-features/derived -name '*.parquet' | wc -l)
-          echo "📦 共 $COUNT 个 parquet 文件"
+            YEAR="${year_dir%/}"
+            REPO="derive-${YEAR}"
+            REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/larkself/${REPO}.git"
 
-      - name: Push derived features
-        run: |
-          cd .work/gp-features
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add derived/
-          git diff --cached --quiet || git commit -m "derived: batch update"
-          for TRY in 1 2 3 4 5; do
-            git pull --rebase
-            if git push; then
-              echo "✅ 推送成功"
-              exit 0
+            echo "📦 处理 ${YEAR} ..."
+
+            # 检查仓库是否存在，不存在则创建
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: token ${GH_TOKEN}" \
+              "https://api.github.com/repos/larkself/${REPO}")
+
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "🆕 创建仓库 larkself/${REPO}"
+              curl -sf -X POST \
+                -H "Authorization: token ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/user/repos" \
+                -d "{\"name\":\"${REPO}\",\"private\":true,\"auto_init\":true}"
+              sleep 3
             fi
-            echo "⚠️ push 失败, 重试 (${TRY}/5)"
-            sleep $((TRY * 3))
+
+            # 克隆仓库
+            git clone --depth 1 "${REPO_URL}" "../repo-${YEAR}"
+
+            # 复制文件 (保持 derived/{YYYY}/ 结构)
+            mkdir -p "../repo-${YEAR}/derived/${YEAR}"
+            cp "${year_dir}"*.parquet "../repo-${YEAR}/derived/${YEAR}/"
+
+            # 提交并推送
+            cd "../repo-${YEAR}"
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add derived/
+            if git diff --cached --quiet; then
+              echo "ℹ️ ${REPO} 无变更"
+            else
+              git commit -m "derived: batch update ${YEAR}"
+              for TRY in 1 2 3 4 5; do
+                git pull --rebase 2>/dev/null || true
+                if git push; then
+                  echo "✅ ${REPO} 推送成功"
+                  break
+                fi
+                echo "⚠️ push 失败, 重试 (${TRY}/5)"
+                sleep $((TRY * 3))
+              done
+            fi
+            cd ../artifacts
           done
-          echo "❌ push 连续失败" >&2
-          exit 1
